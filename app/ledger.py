@@ -160,7 +160,7 @@ class Ledger:
                 del ws.tables[name]
         for i, ws in enumerate(self._managed_sheets()):
             _refresh_table(ws, f"{TABLE_PREFIX}{i + 1}")
-            _fit_columns(ws)
+            fit_columns(ws)
         first = self.wb[self._sheet_order()[0]]  # 열면 맨 앞 문서종류 탭이 보이게
         self.wb.active = self.wb.worksheets.index(first)
         for ws in self.wb.worksheets:
@@ -192,7 +192,7 @@ def _display_width(value) -> int:
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(value))
 
 
-def _fit_columns(ws):
+def fit_columns(ws):
     """내용에 맞춰 열을 넓힌다(최소 10, 최대 60). 사용자가 더 넓혀 둔 열은 줄이지 않는다."""
     for cells in ws.iter_cols(min_row=1, max_row=_last_row(ws)):
         need = max(_display_width(c.value) for c in cells) + 4  # 필터 단추 자리

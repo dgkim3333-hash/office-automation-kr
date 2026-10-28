@@ -23,10 +23,15 @@ class _SafeFormatter(string.Formatter):
         return FORBIDDEN.sub("_", text).strip().rstrip(".") or MISSING
 
 
+def render_text(template, fields) -> str:
+    """{필드} 자리를 채운다. 경로에 못 쓰는 글자는 _, 빈 값은 '미상'."""
+    values = {k: (_Missing() if v is None else v) for k, v in fields.items()}
+    return _SafeFormatter().format(template, **values)
+
+
 def render_filename(result) -> Path:
     """규칙의 파일명 템플릿을 채운다. 결과는 정리문서/ 아래 상대 경로."""
-    values = {k: (_Missing() if v is None else v) for k, v in result.fields.items()}
-    return Path(_SafeFormatter().format(result.doc_type.filename_tpl, **values))
+    return Path(render_text(result.doc_type.filename_tpl, result.fields))
 
 
 def target_path(result, work_dir) -> Path:
