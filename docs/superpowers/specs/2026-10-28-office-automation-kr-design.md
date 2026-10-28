@@ -47,7 +47,7 @@ office-automation-kr/
   README.md                시작점 · 읽는 순서 표 (claude-guide-kr 스타일)
   CLAUDE.md                Claude Code 행동 지침 (6절)
   01_구조_이해.md           GPT와 다른 점 · Code 와 Cowork · 무엇이 PC 밖으로 가는가 · Claude가 하는 일/안 하는 일
-  02_설치.md                Claude Desktop(Code 탭) · uv/Python · 저장소 ZIP 받아 풀기 · 설치.bat 로 작업 폴더 선택
+  02_설치.md                PowerShell 한 줄(install.ps1)로 Claude Desktop → Node.js → uv·uvx → 저장소 → 작업 폴더 자동 설치 · Claude 로그인 · Code 탭 열기 (2026-10-28 변경: 설명 최소화)
   03_첫_실행_10분.md        가짜 샘플 PDF 6종으로 체험 (= tests/test_e2e 시나리오)
   04_내_양식_가르치기.md     Claude Code 프롬프트 레시피 — Invoice → DM 순 · 판별 순서 사례 · check 로 검증
   05_매일_쓰기.md            첨부 저장 → run.bat → 엑셀 확인 · 확인필요/ 처리 루프
@@ -59,6 +59,7 @@ office-automation-kr/
   rules/규칙.예시.yaml       가짜 양식용 규칙. 사용자 실제 규칙은 작업 폴더의 사무자동화/규칙.yaml
   samples/                  가짜 샘플 세트(README_샘플설명.md 참고): PDF 6종 · 고객 PO 엑셀 · 회사 SO 양식 · 기대 장부 + make_samples.py(재생성용)
   tests/
+  install.ps1               한 줄 자동 설치(irm | iex). 이미 있는 것은 건너뜀. BOM 없는 UTF-8
   run.bat                   uv run python -m app
   설치.bat                  uv run python -m app init  (작업 폴더 선택·생성, 4-1절)
   pyproject.toml            의존성: pdfplumber · openpyxl · PyYAML · (dev) pytest · reportlab · pywin32(선택)

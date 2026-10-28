@@ -154,3 +154,9 @@
 - `uv run pytest` 전부 통과.
 - 깨끗한 PC 에서 문서만으로 03장 "성공 3 · 중복 0 · 확인필요 2" 재현.
 - 저장소 전체 grep 으로 회사명·실제 고객명·실제 번호 0건.
+
+## 추가 (2026-10-28) 한 줄 자동 설치
+
+- 요청: 「옆에서 도와주지 않으면 이해할 수 없다. Claude Desktop 설치부터 자동으로, 설명은 빼고, 순서는 Claude Desktop → Node.js → uv·uvx」.
+- 결정: `install.ps1` 을 PowerShell 한 줄(`irm … | iex`)로 실행. 저장소 ZIP 받기와 작업 폴더(`C:\사무자동화`) 생성까지 자동. 손으로 하는 방법은 99장 1절로 옮김.
+- 시험: `tests/test_install_script.py` (-DryRun 으로 1~3단계 설치는 건너뛰고 4·5단계 실제 실행).
