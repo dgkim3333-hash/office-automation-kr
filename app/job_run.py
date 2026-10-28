@@ -56,7 +56,9 @@ RETRY_NOTE = "규칙.yaml 을 고치면 다음 실행 때 다시 시도합니다
 HELD_REASON = "다른 프로그램(PDF 뷰어 · 엑셀 등)에서 열려 있음. 닫으면 다음 실행 때 처리합니다"
 SETTLING_REASON = "방금 바뀐 파일(1분 안). 저장이 끝난 뒤 다음 실행 때 처리합니다"
 LEDGER_LOCKED_REASON = "누적장부가 엑셀에서 열려 있음. 엑셀을 닫으면 다음 실행 때 처리합니다"
-INTERRUPTED = "처리기록에 없음. 지난 실행이 중간에 끊겼을 수 있음"
+INTERRUPTED = "처리기록에 성공 기록이 없음. 지난 실행이 중간에 끊겼거나 되돌리기가 끝나지 못했을 수 있음"
+KEEP_HINT = "입력 폴더에서 원본을 치우세요(그대로 두면 날마다 다시 확인필요가 됩니다)."
+REMAKE_HINT = "그러면 다음 실행 때 새로 만듭니다(처리기록은 고칠 필요 없음)."
 
 
 class JobLocked(Exception):
@@ -305,29 +307,38 @@ class _Run:
             except LocalOnlyError as e:
                 return f"{label} 폴더를 쓸 수 없습니다. {e}"
             if not Path(path).is_dir():
-                return f"{label} 폴더가 없습니다: {path}"
+                return (f"{label} 폴더가 없습니다: {path}\n"
+                        f"폴더를 다시 만들거나(외장 디스크면 연결), Code 탭에서 「{job.title} 작업 {label} 폴더 바꿔 줘」라고 말하세요.")
         if is_locked(Path(job.folder) / RECORD_FILE):
             return (f"{RECORD_FILE} 가 다른 프로그램(엑셀 등)에서 열려 있습니다. 닫고 다시 실행하세요.\n"
-                    "(아무 파일도 처리하지 않았습니다.)")
+                    f"파일 위치: {Path(job.folder) / RECORD_FILE}")
         return None
+
+    def _stop(self, reason: str) -> RunReport:
+        """시작 전에 멈춤. 매일 자동 실행이 조용히 건너뛰지 않도록 알림 대상(stopped)으로 돌려준다."""
+        return RunReport(message=f"중요: {self.job.title} 작업을 실행하지 못했습니다(아무 파일도 처리하지 않음).\n{reason}",
+                         stopped=True)
 
     def run(self) -> RunReport:
         stop = self._preflight()
         if stop:
-            return RunReport(message=stop)
+            return self._stop(stop)
         try:
             self.rules = load_rules(self.job.rules_path)
             self.rules_fp = rules_fingerprint(self.job)
         except (RuleError, OSError) as e:
-            return RunReport(message=f"규칙.yaml 오류: {e}")
+            return self._stop(f"규칙.yaml 오류: {e}\nCode 탭에서 「{self.job.title} 작업 규칙 고쳐 줘」라고 말하세요.")
         if self.job.output_mode in COMPANY_MODES and self.rules.company_form is None:
-            return RunReport(message=(
+            return self._stop(
                 f"출력 방식이 '{self.job.output_mode}' 인데 규칙.yaml 에 회사양식이 없습니다. "
-                "규칙.yaml 에 회사양식을 적거나 출력 방식을 '누적장부' 로 바꾸세요."))
+                f"Code 탭에서 「{self.job.title} 작업 규칙 고쳐 줘」라고 말해 회사양식을 적거나, 출력 방식을 '누적장부' 로 바꾸세요.")
         try:
             self.state = _current_state(load_records(self.job))
         except (OSError, UnicodeDecodeError, csv.Error) as e:
-            return RunReport(message=f"{RECORD_FILE} 를 읽지 못했습니다: {e}")
+            return self._stop(
+                f"{RECORD_FILE} 를 읽지 못했습니다: {e}\n"
+                f"이 파일이 열려 있으면 닫고, 엑셀 등으로 고쳐 저장했다면 원래대로 되돌린 뒤 다시 실행하세요: "
+                f"{Path(self.job.folder) / RECORD_FILE}")
         self.success_keys = {(r.get("문서종류"), r.get("번호")) for r in self.state.values() if r.get("상태") == "성공"}
 
         try:
@@ -392,6 +403,7 @@ class _Run:
         key = (result.doc_type.name, str(result.number))
         if key in self.success_keys:
             self._record(path, fp, result, "중복")
+            self._clear_note(path)
             self._done(path, "중복", f"{key[0]} {key[1]} 이미 처리됨")
             return
         try:
@@ -469,7 +481,10 @@ class _Run:
         """누적장부가 엑셀에서 열려 있어 보류. 판별된 파일이라는 표시로 처리기록에 보류를 남긴다
         (「어느 작업에도 맞지 않는 파일」 로 세지 않게). 보류 기록은 건너뛰지 않으므로 다음 실행 때 다시 처리한다."""
         self.ledger_held += 1
-        self._record(path, fp, result, "보류")
+        if not self.approving:
+            # 승인 실행에서는 승인대기 상태를 그대로 둔다. 보류로 덮으면 다음 자동 실행이 입력 폴더의 원본을
+            # 다시 처리해 승인대기에 복사본을 하나 더 만든다. (원본 지문의 승인대기 기록이 「맞지 않는 파일」 도 막는다)
+            self._record(path, fp, result, "보류")
         self._done(path, "보류", LEDGER_LOCKED_REASON)
 
     def _write(self, path, fp, result, key, checks, master_row):
@@ -484,8 +499,11 @@ class _Run:
         if mode in COMPANY_MODES:
             final = Path(self.job.output_dir) / company_form_name(result, form)
             if final.exists():
-                self._review(path, fp, result, f"출력 폴더에 회사 양식 {final.name} 이 이미 있는데 {INTERRUPTED}. "
-                             "그 파일이 이 문서의 결과가 맞는지 확인하세요(두 번 입력하지 않도록 새로 만들지 않았습니다)")
+                also = " 누적장부에 이 문서 줄이 있으면 그것도 지우세요." if mode in LEDGER_MODES else ""
+                self._review(path, fp, result, (
+                    f"출력 폴더에 회사 양식 {final.name} 이 이미 있는데 {INTERRUPTED}. 두 번 입력하지 않도록 새로 "
+                    f"만들지 않았습니다. 그 파일이 맞으면 {KEEP_HINT} 다시 만들려면 {final.name} 을 지우세요.{also} "
+                    f"{REMAKE_HINT}"))
                 return
         if mode in LEDGER_MODES and self.ledger_locked:
             self._hold_for_ledger(path, fp, result)
@@ -496,8 +514,10 @@ class _Run:
             if mode in LEDGER_MODES:
                 ledger = self._open_ledger()
                 if ledger.is_duplicate(*key):
-                    hint = " 출력 폴더에 회사 양식이 있는지 확인하세요" if mode in COMPANY_MODES else ""
-                    self._review(path, fp, result, f"누적장부에는 {key[0]} {key[1]} 이 있는데 {INTERRUPTED}.{hint}")
+                    also = " 출력 폴더에 이 문서의 회사 양식이 있으면 그것도 지우세요." if mode in COMPANY_MODES else ""
+                    self._review(path, fp, result, (
+                        f"누적장부에는 {key[0]} {key[1]} 이 있는데 {INTERRUPTED}. 결과가 맞으면 {KEEP_HINT} "
+                        f"다시 만들려면 누적장부에서 이 문서 줄(문서 시트와 품목 시트)을 지우세요.{also} {REMAKE_HINT}"))
                     return
                 doc_values = {"처리일시": self.now, "원본파일": path.name, "정리된경로": str(path), **result.fields}
                 ledger.add(result, path.name, path, processed_at=self.now)
