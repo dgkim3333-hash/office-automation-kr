@@ -25,7 +25,7 @@ from app.ledger import ITEMS_SHEET, Ledger, LedgerLocked, is_locked
 from app.local_guard import LocalOnlyError, check_work_dir
 from app.log import append_log
 from app.markup import (
-    MARKUP_FILE, MarkupError, markup_checks, markup_from_bytes, markup_stamp, missing_parts, written_markup,
+    MARKUP_FILE, MarkupError, markup_checks, markup_from_bytes, markup_stamp, missing_reason, written_markup,
 )
 from app.master import MasterError, load_master, lookup
 from app.organize import free_name
@@ -37,8 +37,10 @@ from app.verify import failed, verify
 
 LEDGER_NAME = "누적장부_{제목}.xlsx"  # 출력 폴더에 둔다
 RECORD_FILE = "처리기록.csv"  # 작업 폴더
-RECORD_COLUMNS = ["지문", "파일", "문서종류", "번호", "상태", "규칙지문", "날짜", "양식지문"]
+RECORD_COLUMNS = ["지문", "파일", "문서종류", "번호", "상태", "규칙지문", "날짜", "양식지문", "마크업지문"]
 # 양식지문 = 그 문서 양식(app.forms)의 지문. 승인하지 않은 문서를 그 양식 규칙이 바뀐 뒤에만 다시 처리할 때 쓴다
+# 마크업지문 = 그 문서 파트들의 마크업표 줄 지문(app.markup.markup_stamp, 마크업을 쓸 때만). 승인하지 않은 문서는
+# 그 파트의 마크업이 바뀌어도 다시 처리한다. 이 열이 생기기 전 처리기록(8열)은 머리글에 없어 load_records 가 맞춘다
 LOG_FILE = "처리로그.csv"  # 작업 폴더. 아무도 안 볼 때(자동 실행)를 위한 건별 기록
 LOCK_FILE = "실행중.lock"
 MASTER_FILE = "고객마스터.xlsx"  # 작업 폴더들의 위(work) 에 있는 공용 파일
@@ -72,8 +74,6 @@ REMADE_MISSING = "대조표가 없어 새로 만들었습니다. 보고 승인�
 NOT_DETECTED_WAITING = "승인대기의 이 파일을 지금 규칙으로 알아보지 못했습니다. 규칙을 고치거나 복사본을 지워 거절하세요"
 REMADE_FILE = "승인대기의 파일이 대조표를 만든 뒤 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 REMADE_MARKUP = "마크업표에서 이 문서 파트의 마크업이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
-MARKUP_MISSING = ("마크업표에 없는 파트넘버: {parts}. {file} 에 이 파트 줄(파트넘버 · 마크업%)을 더하면 "
-                  "다음 실행 때 다시 시도합니다(0% 면 0 을 적으세요)")
 APPROVAL_RETRY_NOTE = ("고친 뒤(규칙.yaml · 고객마스터 등) 다시 승인하면 다시 확인합니다. "
                        f"승인하지 않을 문서면 {WAITING} 폴더의 그 복사본을 지우세요.")
 
@@ -170,7 +170,18 @@ def load_records(job: Job) -> list[dict]:
     if not path.exists():
         return []
     with open(path, encoding="utf-8-sig", newline="") as f:
-        return [dict(row) for row in csv.DictReader(f)]
+        rows = []
+        for row in csv.DictReader(f, restkey=_EXTRA):
+            row = dict(row)
+            extra = row.pop(_EXTRA, None)
+            # 옛 머리글(마크업지문 열 없음) 아래 덧붙인 새 줄: 넘친 값을 빠진 열에 순서대로 맞춘다
+            for column, value in zip([c for c in RECORD_COLUMNS if c not in row], extra or []):
+                row[column] = value
+            rows.append(row)
+        return rows
+
+
+_EXTRA = "_넘친값"
 
 
 def _append_record(job: Job, row: dict):
@@ -558,8 +569,9 @@ class _Run:
                 self._review(path, fp, result, NOT_DETECTED_WAITING)
             return  # 판별 실패: 다른 작업 몫일 수 있으므로 기록하지 않고 그대로 둔다
         if (self.rejected is not None and result.doc_type is not None
-                and self._form_fp(result) == self.rejected.get("양식지문")):
-            return  # 그 양식 규칙이 그대로: 친구가 거절한 값 그대로이므로 건너뛴다
+                and self._form_fp(result) == self.rejected.get("양식지문")
+                and not self._markup_changed(result, self.rejected.get("마크업지문"))):
+            return  # 그 양식 규칙 · 그 파트 마크업이 그대로: 친구가 거절한 값 그대로이므로 건너뛴다
         if result.review_reason:
             self._review(path, fp, result, result.review_reason)
             return
@@ -621,9 +633,9 @@ class _Run:
             except MarkupError as e:
                 self._review(path, fp, result, str(e))
                 return
-            missing = missing_parts(result, form, markup)
+            missing = missing_reason(result, form, markup)
             if missing:  # 0% 로 넘기지 않는다
-                self._review(path, fp, result, MARKUP_MISSING.format(parts=", ".join(missing), file=MARKUP_FILE))
+                self._review(path, fp, result, missing)
                 return
             _, rows = company_rows(result, master_row, form, markup)
             more = markup_checks(result, written_markup(form, rows), markup, form.markup)
@@ -657,10 +669,28 @@ class _Run:
             self.form_fps[key] = rules_form_fingerprint(self.rules, key)
         return self.form_fps[key]
 
+    def _markup_fp(self, result) -> str:
+        """그 문서 파트들의 마크업표 줄 지문. 마크업을 쓰지 않거나 마크업표를 아직 · 못 읽었으면 빈 글자."""
+        if not self.markup_used or self.markup_table is None or result is None or result.doc_type is None:
+            return ""
+        return markup_stamp(result, self.rules.company_form, self.markup_table)
+
+    def _markup_changed(self, result, recorded) -> bool:
+        """승인하지 않은 문서의 기록 뒤 그 파트들의 마크업이 바뀌었나. 기록이 없거나(옛 줄 · 마크업 안 씀)
+        마크업표를 쓸 수 없으면 바뀌지 않은 것으로 본다(거절한 문서를 내보낼 일은 없고, 다시 보낼 근거도 없음)."""
+        if not recorded or not self.markup_used:
+            return False
+        try:
+            self._markup()
+        except MarkupError:
+            return False
+        return self._markup_fp(result) != recorded
+
     def _stamps(self, fp, result) -> dict:
         stamps = {STAMP_FORM: self._form_fp(result), STAMP_FILE: fp}
-        if self.markup_used and self.markup_table is not None:
-            stamps[STAMP_MARKUP] = markup_stamp(result, self.rules.company_form, self.markup_table)
+        markup = self._markup_fp(result)
+        if markup:
+            stamps[STAMP_MARKUP] = markup
         return stamps
 
     def _unseen(self, path, fp, result) -> str | None:
@@ -883,6 +913,7 @@ class _Run:
             "규칙지문": self.rules_fp,
             "날짜": self.today,
             "양식지문": self._form_fp(result) if result is not None and result.doc_type is not None else "",
+            "마크업지문": self._markup_fp(result),
         }
         try:
             _append_record(self.job, row)

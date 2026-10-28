@@ -148,7 +148,7 @@ def test_runs_only_detected_files_and_leaves_others(env):
     raw = (job.folder / RECORD_FILE).read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf")  # utf-8-sig
     with open(job.folder / RECORD_FILE, encoding="utf-8-sig", newline="") as f:
-        assert next(csv.reader(f)) == ["지문", "파일", "문서종류", "번호", "상태", "규칙지문", "날짜", "양식지문"]
+        assert next(csv.reader(f)) == ["지문", "파일", "문서종류", "번호", "상태", "규칙지문", "날짜", "양식지문", "마크업지문"]
     assert load_job(job.folder).last_run == datetime.now().date().isoformat()
 
 

@@ -5,6 +5,7 @@
 """
 import hashlib
 import io
+import re
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, Inexact, InvalidOperation, localcontext
 from pathlib import Path
@@ -144,6 +145,15 @@ def _plain(number: Decimal) -> Decimal:
     return number.quantize(Decimal(1)) if number.as_tuple().exponent > 0 else number
 
 
+# 서식 문자열에서 글자로 찍히는 부분: "따옴표 안" 과 \ 다음 한 글자. 여기 든 % 는 백분율 서식이 아니다
+_LITERAL = re.compile(r'"[^"]*"|\\.')
+
+
+def is_percent_format(number_format) -> bool:
+    r"""엑셀 칸 서식이 백분율인가(값 x 100 으로 보이는가). '0.00"%"' · '0\%' 처럼 글자로 찍는 % 는 아니다."""
+    return "%" in _LITERAL.sub("", str(number_format or ""))
+
+
 def _rate(cell) -> Decimal:
     value = cell.value if cell is not None else None
     if _empty(value):
@@ -152,11 +162,13 @@ def _rate(cell) -> Decimal:
         raise ValueError(f"{RATE_COLUMN} '{value}' 가 숫자가 아닙니다")
     if isinstance(value, (int, float, Decimal)):
         number = excel_number(value)
-        if number is not None and "%" in (cell.number_format or ""):
+        explicit = is_percent_format(cell.number_format)
+        if number is not None and explicit:
             number = number * 100  # 백분율 서식 칸: 엑셀은 3% 를 0.03 으로 보관한다
     else:
         text = str(value).strip()
-        text = text[:-1].strip() if text.endswith("%") else text
+        explicit = text.endswith("%")
+        text = text[:-1].strip() if explicit else text
         try:
             number = Decimal(text.replace(",", ""))
         except InvalidOperation:
@@ -166,6 +178,10 @@ def _rate(cell) -> Decimal:
     number = _plain(number)
     if not (0 <= number <= MAX_RATE):
         raise ValueError(f"{RATE_COLUMN} {number} 는 0 이상 {MAX_RATE} 이하여야 합니다")
+    if 0 < number < 1 and not explicit:
+        # 서식 없는 0.03 은 0.03% 다. 3% 를 0.03 으로 잘못 적었으면 마크업이 1/100 이 되므로 받지 않는다(Ruling 22)
+        raise ValueError(f"{_show(number)} 은 {_show(number)}% 로 읽힙니다. 3% 면 3 을, "
+                         "1% 미만이면 0.5% 처럼 % 를 붙여 적으세요")
     return number
 
 
@@ -241,16 +257,38 @@ def markup_value(source: str, item, columns: MarkupColumns, table):
 
 
 def missing_parts(result, form, table) -> list[str]:
-    """회사 양식이 마크업을 쓰는데 마크업표에 없는 파트넘버(나온 순서, 한 번씩). 빈 품번은 (빈칸)."""
+    """회사 양식이 마크업을 쓰는데 마크업표에 없는 파트넘버(나온 순서, 한 번씩). 빈 품번은 넣지 않는다(blank_parts)."""
     if form is None or not form.uses_markup:
         return []
     missing = []
     for item in result.table or []:
-        if lookup_row(item, form.markup, table) is None:
-            label = _label((item or {}).get(form.markup.part))
+        part = (item or {}).get(form.markup.part)
+        if part_key(part) and lookup_row(item, form.markup, table) is None:
+            label = _label(part)
             if label not in missing:
                 missing.append(label)
     return missing
+
+
+def blank_parts(result, form) -> int:
+    """마크업을 쓰는데 품번이 비어 있는 품목 줄 수. 마크업표에 더할 것이 아니라 규칙(품번 열)을 볼 일이다."""
+    if form is None or not form.uses_markup:
+        return 0
+    return sum(1 for item in result.table or [] if not part_key((item or {}).get(form.markup.part)))
+
+
+def missing_reason(result, form, table) -> str | None:
+    """마크업을 붙일 수 없는 품목이 있으면 확인필요 사유(빠진 파트 · 빈 품번), 없으면 None."""
+    missing, blanks = missing_parts(result, form, table), blank_parts(result, form)
+    lines = []
+    if missing:
+        lines.append(f"마크업표에 없는 파트넘버: {', '.join(missing)}. {MARKUP_FILE} 에 이 파트 줄(파트넘버 · 마크업%)을 "
+                     "더하면 다음 실행 때 다시 시도합니다(0% 면 0 을 적으세요)")
+        if any(p.startswith("0") for p in missing):
+            lines.append("앞자리가 0 인 품번은 마크업표 칸을 텍스트 서식으로 적어야 맞습니다")
+    if blanks:
+        lines.append(f"품번이 비어 있는 줄이 {blanks}개 있습니다. 규칙.yaml 의 품번 열을 확인하세요")
+    return "\n".join(lines) or None
 
 
 def written_markup(form, rows) -> list[dict]:

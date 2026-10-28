@@ -413,3 +413,142 @@ def test_check_command_shows_markup_per_line(env, capsys):
     check(po, rules, work, job)
     out_text = capsys.readouterr().out
     assert "| 1줄 본사 단가 |" in out_text and "| 2줄 마크업% (B-77) | 마크업표 2% |" in out_text
+
+
+# --- 수정 1차(Ruling 22 · 23, 리뷰 Minor) ---
+
+def _one_rate(tmp_path, value, number_format=None):
+    path = tmp_path / MARKUP_FILE
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["파트넘버", "마크업%"])
+    ws.append(["A", value])
+    if number_format is not None:
+        ws["B2"].number_format = number_format
+    wb.save(path)
+    return path
+
+
+@pytest.mark.parametrize("value", [0.03, "0.03", 0.5, " 0.99 "])
+def test_plain_rate_under_one_percent_is_ambiguous(tmp_path, value):
+    """서식 없는 0.03 은 0.03% 로 읽힌다. 3% 를 잘못 적은 것일 수 있으므로 거부한다(Ruling 22)."""
+    with pytest.raises(MarkupError) as e:
+        load_markup(_one_rate(tmp_path, value))
+    text = str(e.value)
+    assert "2번째 줄" in text and "% 로 읽힙니다" in text and "3% 면 3 을" in text and "% 를 붙여" in text
+
+
+@pytest.mark.parametrize("value, number_format, rate", [
+    (0.005, "0.0%", "0.5"),     # 백분율 서식 칸
+    ("0.5%", None, "0.5"),      # % 를 붙인 글자
+    (" 0.25 % ", None, "0.25"),
+    (0, None, "0"),              # 0% 는 그대로
+    (1, None, "1"),
+    (3, None, "3"),
+])
+def test_rate_under_one_percent_allowed_when_percent_is_explicit(tmp_path, value, number_format, rate):
+    assert load_markup(_one_rate(tmp_path, value, number_format))["a"].rate == Decimal(rate)
+
+
+@pytest.mark.parametrize("number_format, rate", [
+    ('0.00"%"', "3"),   # 따옴표 안의 % 는 글자일 뿐 백분율 서식이 아니다
+    ("0\\%", "3"),     # \% 도 글자
+    ('"%"0%', "300"),   # 따옴표 밖에 % 가 있으면 백분율 서식(3 → 300%, 범위 밖)
+])
+def test_percent_format_ignores_quoted_or_escaped_percent(tmp_path, number_format, rate):
+    path = _one_rate(tmp_path, 3, number_format)
+    if rate == "300":
+        with pytest.raises(MarkupError, match="0 이상 10 이하"):
+            load_markup(path)
+    else:
+        assert load_markup(path)["a"].rate == Decimal(rate)
+
+
+def test_blank_part_numbers_are_reported_separately():
+    from app.extract import ExtractResult
+    from app.markup import missing_reason
+    rules = rules_from_text(RULES)
+    result = ExtractResult(doc_type=rules.get("PO"), fields={}, table=[
+        {"품번": "", "수량": 1, "단가": Decimal("1")}, {"품번": "B-77", "수량": 1, "단가": Decimal("1")},
+        {"품번": None, "수량": 1, "단가": Decimal("1")}, {"품번": "A", "수량": 1, "단가": Decimal("1")}])
+    table = {"a": MarkupRow("A", Decimal("3"), None)}
+    assert missing_parts(result, rules.company_form, table) == ["B-77"]  # 빈 품번은 「더할 파트」가 아니다
+    reason = missing_reason(result, rules.company_form, table)
+    assert "마크업표에 없는 파트넘버: B-77." in reason and "(빈칸)" not in reason
+    assert "품번이 비어 있는 줄이 2개 있습니다. 규칙.yaml 의 품번 열을 확인하세요" in reason
+
+    only_blank = ExtractResult(doc_type=rules.get("PO"), fields={}, table=[{"품번": " ", "수량": 1, "단가": 1}])
+    reason = missing_reason(only_blank, rules.company_form, table)
+    assert reason.startswith("품번이 비어 있는 줄이 1개") and "마크업표에 없는" not in reason
+    full = ExtractResult(doc_type=rules.get("PO"), fields={}, table=[{"품번": "a", "수량": 1, "단가": 1}])
+    assert missing_reason(full, rules.company_form, table) is None
+
+
+def test_missing_part_with_leading_zero_gets_text_format_hint(env):
+    work, inp, out, job = env
+    _markup(work / MARKUP_FILE, [[123, 3, None]])  # 엑셀이 0123 을 숫자 123 으로 바꿔 둔 마크업표
+    _po(inp / "po1.xlsx", "PO-1", [("0123", 1, "1.00")])
+
+    assert run_job(job, work).counts["확인필요"] == 1
+    note = (job.folder / "확인필요" / "po1.xlsx.txt").read_text(encoding="utf-8")
+    assert "마크업표에 없는 파트넘버: 0123." in note
+    assert "앞자리가 0 인 품번은 마크업표 칸을 텍스트 서식으로 적어야 맞습니다" in note
+
+
+def test_missing_part_without_leading_zero_has_no_hint(env):
+    work, inp, out, job = env
+    _markup(work / MARKUP_FILE, [["A", 3, None]])
+    _po(inp / "po1.xlsx", "PO-1", [("B-10", 1, "1.00")])
+    run_job(job, work)
+    assert "텍스트 서식" not in (job.folder / "확인필요" / "po1.xlsx.txt").read_text(encoding="utf-8")
+
+
+def _reject(env):
+    """PO-1 을 승인대기로 보낸 뒤 친구가 복사본을 지워 거절한 상태."""
+    work, inp, out, job = env
+    _markup(work / MARKUP_FILE, [["A", 3, None], ["Z", 1, None]])
+    _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10")])
+    assert run_job(job, work, gate=approval_gate).counts["승인대기"] == 1
+    (job.folder / "승인대기" / "po1.xlsx").unlink()
+    assert run_job(job, work, gate=lambda *a: False).counts == dict.fromkeys(("성공", "중복", "확인필요", "승인대기", "보류"), 0)
+    return env
+
+
+def test_rejected_document_comes_back_when_its_part_markup_changes(env):
+    """거절한 문서는 그 파트의 마크업을 고치면 다시 승인대기로 간다. 자동 실행이 내보내지는 않는다(Ruling 23)."""
+    work, inp, out, job = _reject(env)
+    _markup(work / MARKUP_FILE, [["A", 2, None], ["Z", 1, None]])
+
+    report = run_job(job, work, gate=lambda *a: False)
+
+    assert report.counts["승인대기"] == 1 and report.counts["성공"] == 0
+    assert list(out.iterdir()) == []
+    assert (job.folder / "승인대기" / "po1.xlsx").exists()
+    # 다시 승인대기로 보낸 기록은 지금 마크업으로 남아, 다음 실행은 그대로 건너뛴다
+    (job.folder / "승인대기" / "po1.xlsx").unlink()
+    assert run_job(job, work, gate=lambda *a: False).counts["승인대기"] == 0
+
+
+def test_rejected_document_stays_rejected_when_unrelated_markup_changes(env):
+    work, inp, out, job = _reject(env)
+    _markup(work / MARKUP_FILE, [["A", 3, None], ["Z", 2, None], ["Y", 1, None]])
+
+    report = run_job(job, work, gate=lambda *a: False)
+
+    assert report.counts == dict.fromkeys(report.counts, 0)
+    assert not (job.folder / "승인대기" / "po1.xlsx").exists()
+
+
+def test_old_record_rows_without_markup_column_still_load(env):
+    """마크업지문 열이 생기기 전의 처리기록(8열)도 읽고, 그 뒤 줄은 9열로 덧붙인다."""
+    work, inp, out, job = env
+    from app.job_run import RECORD_FILE
+    (job.folder / RECORD_FILE).write_text(
+        "지문,파일,문서종류,번호,상태,규칙지문,날짜,양식지문\nabc,old.xlsx,PO,PO-0,성공,r,2026-10-01,f\n",
+        encoding="utf-8-sig")
+    _markup(work / MARKUP_FILE, [["A", 3, None]])
+    _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10")])
+    assert run_job(job, work).counts["성공"] == 1
+    records = load_records(job)
+    assert records[0]["양식지문"] == "f" and records[0].get("마크업지문", "") == ""
+    assert records[1]["상태"] == "성공" and len(records[1]["마크업지문"]) == 16

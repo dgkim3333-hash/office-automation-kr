@@ -31,7 +31,7 @@ from app.job_run import COMPANY_MODES, LEDGER_MODES, MASTER_PREFIX, JobLocked, j
 from app.notify import notify_failure, notify_report
 from app.jobs import JOBS_DIR, JobError, broken_jobs, create_job, find_job, list_jobs, save_job
 from app.local_guard import BANNER, LocalOnlyError, block_network, check_environment, check_work_dir
-from app.markup import MARKUP_FILE, MarkupError, load_markup, markup_checks, missing_parts, written_markup
+from app.markup import MARKUP_FILE, MarkupError, load_markup, markup_checks, missing_reason, written_markup
 from app.master import MasterError, load_master, lookup
 from app.organize import free_name
 from app.outlook import collect_from_outlook
@@ -594,10 +594,10 @@ def _check_markup(result, form, master_row, work):
         print(f"\n마크업표: {e}")
         print("이대로 실행하면 이 문서는 확인필요로 갑니다.")
         return
-    missing = missing_parts(result, form, table)
+    missing = missing_reason(result, form, table)
     if missing:
-        print(f"\n마크업표: 없는 파트넘버 {', '.join(missing)} ({MARKUP_FILE} 에 더해야 회사 양식이 만들어집니다. "
-              "이대로 실행하면 확인필요)")
+        print(f"\n마크업표: {missing}")
+        print("이대로 실행하면 이 문서는 확인필요로 갑니다(회사 양식을 만들지 않음).")
         return
     _, rows = company_rows(result, master_row, form, table)
     checks = markup_checks(result, written_markup(form, rows), table, form.markup)
