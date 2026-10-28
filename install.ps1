@@ -151,7 +151,8 @@ $ManifestName = '.installed-files.txt'
 # 목록이 생기기 전(2026-10-28 장 번호 변경 전)에 설치한 PC 용: 이름이 바뀐 옛 장 파일만
 $LegacyFiles = @(
     '02_설치.md', '03_첫_실행_10분.md', '04_내_양식_가르치기.md', '05_매일_쓰기.md',
-    '06_프로젝트와_예정됨.md', '07_선택_Outlook_자동수집.md', '08_선택_엑셀PO변환.md'
+    '06_프로젝트와_예정됨.md', '07_선택_Outlook_자동수집.md', '08_선택_엑셀PO변환.md',
+    '04_첫_실행_10분.md', '09_선택_엑셀PO변환.md'
 )
 
 function Remove-StaleFiles($repo, $newFiles) {
