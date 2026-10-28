@@ -148,11 +148,12 @@ function Install-UvFromZip($binDir, [switch]$NoPath) {
 # 업데이트 때 정리: 지난번에 설치한 파일 목록(.installed-files.txt)에 있었는데 새 판에 없는 파일만 지운다.
 # 목록에 없는 파일(작업폴더.txt, .venv, 사용자가 넣은 파일)은 건드리지 않는다.
 $ManifestName = '.installed-files.txt'
-# 목록이 생기기 전(2026-10-28 장 번호 변경 전)에 설치한 PC 용: 이름이 바뀐 옛 장 파일만
+# 목록이 생기기 전(2026-10-28 장 번호 변경 전)에 설치한 PC 용: 이름이 바뀌거나 없어진 옛 파일만
 $LegacyFiles = @(
     '02_설치.md', '03_첫_실행_10분.md', '04_내_양식_가르치기.md', '05_매일_쓰기.md',
     '06_프로젝트와_예정됨.md', '07_선택_Outlook_자동수집.md', '08_선택_엑셀PO변환.md',
-    '04_첫_실행_10분.md', '09_선택_엑셀PO변환.md'
+    '04_첫_실행_10분.md', '09_선택_엑셀PO변환.md',
+    '04_처음_처리하기.md', '수집.bat', 'tests/test_e2e.py', 'tests/test_e2e_excel.py'
 )
 
 function Remove-StaleFiles($repo, $newFiles) {
@@ -265,7 +266,7 @@ try {
     } else {
         Write-Host '끝났습니다.' -ForegroundColor Green
         Write-Host "다음: Claude 열기 → 로그인 → 「Code」 → 「폴더 열기」 → $repo"
-        Write-Host '그다음 04장(내 파일 1개로 처음 처리하기)을 하세요.'
+        Write-Host '그다음 04장(작업 만들기)을 하세요. Code 탭에 「작업지시서대로 새 작업 만들어 줘」라고 보내면 됩니다.'
         if (-not $DryRun) { Start-Process explorer.exe -ArgumentList "`"$repo`"" }
     }
 } catch {
