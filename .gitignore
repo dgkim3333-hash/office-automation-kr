@@ -1,0 +1,11 @@
+# 작업 폴더 위치(사용자 PC 전용)
+작업폴더.txt
+
+# 파이썬·도구
+.venv/
+__pycache__/
+.pytest_cache/
+.superpowers/
+
+# 장부는 저장소에 두지 않는다
+*.xlsx

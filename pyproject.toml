@@ -1,0 +1,24 @@
+[project]
+name = "office-automation-kr"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "openpyxl>=3.1.5",
+    "pdfplumber>=0.11.10",
+    "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+outlook = [
+    "pywin32>=312 ; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "reportlab>=5.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
