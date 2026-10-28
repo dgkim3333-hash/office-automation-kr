@@ -229,6 +229,9 @@ try {
             ForEach-Object { $_.FullName.Substring($freshRoot.Length + 1) })
         $removed = Remove-StaleFiles $repo $newFiles
         Get-ChildItem -LiteralPath $freshRoot -Force | Copy-Item -Destination $repo -Recurse -Force
+        # GitHub 압축은 파일 시각을 미국 시간으로 적어 '어제'처럼 보이므로, 받은 파일의 날짜를 설치한 시각으로 맞춘다
+        $installedAt = Get-Date
+        foreach ($rel in $newFiles) { (Get-Item -LiteralPath (Join-Path $repo $rel) -Force).LastWriteTime = $installedAt }
         [IO.File]::WriteAllLines((Join-Path $repo $ManifestName), [string[]]$newFiles, (New-Object Text.UTF8Encoding $false))
         Remove-Item -LiteralPath $fresh -Recurse -Force -ErrorAction SilentlyContinue
         $cleaned = ''

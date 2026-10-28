@@ -286,3 +286,21 @@ def test_update_without_list_removes_only_known_renamed_chapters(tmp_path, repo_
     assert (repo / "내메모.txt").exists()
     assert (repo / "08_선택_Outlook_자동수집.md").exists()   # 새 판의 같은 번호 장은 남음
     assert (repo / ".installed-files.txt").exists()          # 이번에 목록이 생김
+
+def test_installed_files_get_install_time_not_zip_time(tmp_path, repo_zip):
+    """GitHub 압축은 파일 시각을 미국 시간으로 적어 '어제'처럼 보인다. 설치 시각으로 맞춘다."""
+    import time
+
+    old_zip = tmp_path / "old_time.zip"
+    with zipfile.ZipFile(repo_zip) as src, zipfile.ZipFile(old_zip, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            info.date_time = (2020, 1, 1, 0, 0, 0)
+            dst.writestr(info, src.read(info.filename))
+    started = time.time() - 5
+    install_dir = tmp_path / "dev"
+    proc = _run_like_irm("-DryRun", "-Part", "program", "-RepoZip", str(old_zip), "-InstallDir", str(install_dir),
+                         "-WorkDir", str(tmp_path / "사무자동화"), "-ClaudeHome", str(tmp_path / "ch"))
+    assert proc.returncode == 0, proc.stdout.decode("utf-8", "replace")
+    repo = install_dir / "office-automation-kr-main"
+    for name in ("체험.bat", "README.md", "app/__main__.py", "samples/03_Invoice_DM_PDF/INV-2026-10231.pdf"):
+        assert (repo / name).stat().st_mtime >= started, name
