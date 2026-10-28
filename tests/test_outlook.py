@@ -23,11 +23,12 @@ class FakeMail:
         self.saved = True
 
 
-def test_saves_only_pdf_attachments(tmp_path):
-    mail = FakeMail([FakeAttachment("a.pdf"), FakeAttachment("logo.png"), FakeAttachment("B.PDF")])
+def test_saves_pdf_and_excel_attachments_only(tmp_path):
+    mail = FakeMail([FakeAttachment("a.pdf"), FakeAttachment("logo.png"), FakeAttachment("B.PDF"),
+                     FakeAttachment("주문.xlsx"), FakeAttachment("옛주문.xls"), FakeAttachment("메모.docx")])
     saved = collect([mail], tmp_path)
-    assert sorted(p.name for p in saved) == ["B.PDF", "a.pdf"]
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["B.PDF", "a.pdf"]
+    assert sorted(p.name for p in saved) == ["B.PDF", "a.pdf", "옛주문.xls", "주문.xlsx"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["B.PDF", "a.pdf", "옛주문.xls", "주문.xlsx"]
 
 
 def test_same_name_gets_suffix(tmp_path):

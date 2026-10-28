@@ -1,4 +1,4 @@
-"""(선택) Outlook 데스크톱 앱의 '받은 편지함/자동화' 폴더 메일에서 PDF 첨부를 받은문서/ 로 복사한다.
+"""(선택) Outlook 데스크톱 앱의 '받은 편지함/자동화' 폴더 메일에서 PDF·엑셀 첨부를 받은문서/ 로 복사한다.
 
 PC 안의 Outlook 앱과만 대화하며, 외부로 아무것도 보내지 않는다.
 실행: 수집.bat (= uv run --extra outlook python -m app outlook)
@@ -9,6 +9,7 @@ from app.organize import free_name
 
 FOLDER_NAME = "자동화"
 DONE_CATEGORY = "자동화완료"
+ATTACHMENT_SUFFIXES = (".pdf", ".xlsx", ".xls")  # .xls 는 받은 뒤 확인필요에서 다시 저장 안내
 OL_FOLDER_INBOX = 6
 
 NO_OUTLOOK = (
@@ -23,7 +24,7 @@ def _categories(mail):
 
 
 def collect(mails, inbox_dir) -> list[Path]:
-    """메일 목록에서 PDF 첨부를 저장하고, 처리한 메일에 범주 '자동화완료' 를 붙인다."""
+    """메일 목록에서 PDF·엑셀 첨부를 저장하고, 처리한 메일에 범주 '자동화완료' 를 붙인다."""
     inbox_dir = Path(inbox_dir)
     inbox_dir.mkdir(parents=True, exist_ok=True)
     saved = []
@@ -33,7 +34,7 @@ def collect(mails, inbox_dir) -> list[Path]:
             continue
         for i in range(_count(mail.Attachments)):
             attachment = _item(mail.Attachments, i)
-            if not attachment.FileName.lower().endswith(".pdf"):
+            if not attachment.FileName.lower().endswith(ATTACHMENT_SUFFIXES):
                 continue
             dst = free_name(inbox_dir / attachment.FileName)
             attachment.SaveAsFile(str(dst))
@@ -76,5 +77,5 @@ def collect_from_outlook(inbox_dir, connect=_connect) -> list[Path]:
         print(f"- 받은 편지함 아래에 '{FOLDER_NAME}' 폴더가 있는지도 확인하세요.")
         return []
     saved = collect(mails, inbox_dir)
-    print(f"Outlook 에서 PDF {len(saved)}개를 받은문서에 저장했습니다.")
+    print(f"Outlook 에서 첨부(PDF·엑셀) {len(saved)}개를 받은문서에 저장했습니다.")
     return saved
