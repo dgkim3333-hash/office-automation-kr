@@ -1,5 +1,5 @@
 """문서별 결과 엑셀(출력파일). 엑셀 PO → 회사 SO 양식, PDF → 추출결과."""
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -188,11 +188,15 @@ def _same_value(want, got) -> bool:
         return want is got
     if isinstance(want, datetime):
         return isinstance(got, datetime) and want == got
-    if isinstance(want, date):  # 날짜 칸은 엑셀에서 날짜+시각으로 돌아온다
-        return (got.date() if isinstance(got, datetime) else got) == want
+    if isinstance(want, date):  # 날짜 칸은 엑셀에서 자정 시각의 날짜+시각으로 돌아온다. 시각이 있으면 다른 값
+        return (got == datetime.combine(want, time.min)) if isinstance(got, datetime) else got == want
     if isinstance(want, (Decimal, int, float)) and isinstance(got, (int, float, Decimal)):
         try:
-            return Decimal(str(got)) == Decimal(str(want)) or float(want) == float(got)
+            number, back = Decimal(str(want)), Decimal(str(got))
+            if number == back:
+                return True
+            # 15자리를 넘는 소수는 엑셀이 15자리로 저장하므로 그때만 float 로 비교. 정수는 정확히 같아야 한다
+            return number != number.to_integral_value() and len(number.as_tuple().digits) > 15                 and float(number) == float(back)
         except (InvalidOperation, ValueError, OverflowError):
             return False
     return want == got

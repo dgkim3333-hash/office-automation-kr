@@ -149,7 +149,7 @@ def test_read_back_reports_changed_cell(rules, master, tmp_path):
     problems = read_back(path, rules.company_form.sheet, header, rows)
     assert len(problems) == 1
     assert problems[0].startswith("3행 Unit Price: 쓴 값 ") and "읽은 값 999" in problems[0]
-    assert written is not None
+    assert written != 999
 
 
 def test_company_form_from_pdf_result(rules):
@@ -176,9 +176,16 @@ def test_read_back_decimal_equal_by_value(tmp_path):
     assert _roundtrip(tmp_path, Decimal("12.50"), 12) == ["2행 Unit Price: 쓴 값 12.50, 읽은 값 12"]
 
 
+def test_read_back_large_integers_must_match_exactly(tmp_path):
+    assert _roundtrip(tmp_path, 9007199254740993, 9007199254740992) != []
+    assert _roundtrip(tmp_path, 9007199254740992, 9007199254740992) == []  # 엑셀은 정수도 double 로 저장
+    assert _roundtrip(tmp_path, Decimal("9007199254740993"), 9007199254740992) != []
+
+
 def test_read_back_date_and_blank(tmp_path):
     assert _roundtrip(tmp_path, date(2026, 10, 28), datetime(2026, 10, 28)) == []
     assert _roundtrip(tmp_path, date(2026, 10, 28), datetime(2026, 10, 29)) != []
+    assert _roundtrip(tmp_path, date(2026, 10, 28), datetime(2026, 10, 28, 15, 30)) != []
     assert _roundtrip(tmp_path, None, None) == []
     assert _roundtrip(tmp_path, "", None) == []
     assert _roundtrip(tmp_path, None, "x") == ["2행 Unit Price: 쓴 값 (빈칸), 읽은 값 x"]
