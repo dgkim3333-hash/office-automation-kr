@@ -479,3 +479,125 @@ def test_rejected_copy_note_is_removed_with_its_check_file(env, monkeypatch):
     write_check_file(waiting / "대조표", read_excel(ACME_PO, load_rules(job.rules_path)), [], ACME_PO.name)
     approve(job, work)
     assert _files(waiting / "대조표") == [] and note.is_file()
+
+
+# --- 수정 2차: 거절 문서는 늘 승인대기로 · 규칙 한 번 읽기 · 판별 안 되는 복사본 ---
+
+def _reject_acme_with_full_approvals(env):
+    """ACME 문서를 승인대기로 보낸 뒤 친구가 복사본을 지워 거절하고, 그 뒤 다른 문서로 ACME 승인 수가 10 이 된 상태."""
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    (job.folder / "승인대기" / ACME_PO.name).unlink()
+    _approved(job, "ACME", REQUIRED)
+    save_job(job)
+    return work, inp, out, job
+
+
+@pytest.mark.parametrize("edit", [
+    ('합계금액:    {패턴: "Total Debit', '합계금액:    {패턴: "(?i)Total Debit'),  # 다른 양식(DM)만 고침
+    ("시트순서: [Invoice, DM, PO]", "# 메모\n시트순서: [Invoice, DM, PO]"),  # 설명 줄만 더함
+])
+def test_rejected_document_stays_rejected_when_its_form_did_not_change(env, edit):
+    work, inp, out, job = _reject_acme_with_full_approvals(env)
+    _edit_rules(job, *edit)
+
+    report = run_job(job, work, now=datetime.now() + timedelta(days=1), gate=approval_gate)
+
+    assert report.counts == dict.fromkeys(report.counts, 0)
+    assert _files(out) == [] and _files(job.folder / "승인대기") == []
+
+
+def test_rejected_document_always_goes_back_to_waiting_never_out(env):
+    """그 양식 규칙을 고쳐 다시 처리하는 거절 문서는 승인 수 · 게이트와 상관없이 늘 승인대기로 간다."""
+    work, inp, out, job = _reject_acme_with_full_approvals(env)
+    _edit_rules(job, '납품처:     "오른쪽:Deliver To:"', '납품처:     "B7"')
+
+    report = run_job(job, work, now=datetime.now() + timedelta(days=1), gate=lambda *a: False)
+
+    assert report.counts["성공"] == 0 and report.counts["승인대기"] == 1
+    assert _files(out) == [] and _files(job.folder / "승인대기") == [ACME_PO.name]
+    assert load_records(job)[-1]["양식지문"] == form_fingerprint(job.rules_path, "ACME")
+
+
+def test_rejected_document_review_keeps_waiting_state(env, monkeypatch):
+    """다시 처리한 거절 문서가 확인필요가 돼도 승인대기 기록을 지켜, 고친 뒤에도 내보내지 않고 승인대기로 보낸다."""
+    work, inp, out, job = _reject_acme_with_full_approvals(env)
+    _edit_rules(job, '납품처:     "오른쪽:Deliver To:"', '납품처:     "B7"')
+    monkeypatch.setattr(job_run, "lookup", lambda master, customer: None)
+
+    first = run_job(job, work, now=datetime.now() + timedelta(days=1), gate=lambda *a: False)
+
+    assert first.counts["확인필요"] == 1 and load_records(job)[-1]["상태"] == "승인대기"
+    monkeypatch.undo()
+
+    second = run_job(job, work, now=datetime.now() + timedelta(days=2), gate=lambda *a: False)
+
+    assert second.counts["성공"] == 0 and second.counts["승인대기"] == 1
+    assert _files(out) == []
+
+
+def test_rules_are_read_once_per_run(env, monkeypatch):
+    """추출 뒤 대조표를 만들기 전에 규칙.yaml 이 바뀌어도, 대조표 지문 · 승인 지문 · 처리기록은 추출에 쓴 규칙의 것."""
+    import yaml as _yaml
+
+    from app.forms import form_fingerprint_data
+
+    work, inp, out, job = env
+    original = job.rules_path.read_text(encoding="utf-8")
+    want = form_fingerprint_data(_yaml.safe_load(original), "ACME")
+    real = job_run.verify
+
+    def verify_then_edit(result, path):
+        checks = real(result, path)
+        job.rules_path.write_text(original.replace('납품처:     "오른쪽:Deliver To:"', '납품처:     "B7"'),
+                                  encoding="utf-8")
+        return checks
+
+    monkeypatch.setattr(job_run, "verify", verify_then_edit)
+    _drop(ACME_PO, inp)
+
+    assert run_job(job, work, gate=approval_gate).counts["승인대기"] == 1
+
+    assert form_fingerprint(job.rules_path, "ACME") != want  # 파일은 바뀌었다
+    _, stamps = check_file_info(job.folder / "승인대기" / "대조표" / CHECK_ACME)
+    assert stamps["form_fingerprint"] == want
+    assert job.fingerprints["ACME"] == want
+    assert load_records(job)[-1]["양식지문"] == want
+
+
+def test_waiting_copy_not_detected_any_more_is_reported(env):
+    """승인 실행에서 지금 규칙으로 판별되지 않는 복사본은 조용히 두지 않고 확인필요로 알린다. 복사본은 남긴다."""
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    _edit_rules(job, '판별키워드: ["Buyer:"]', '판별키워드: ["NoSuchWord"]')
+
+    report = approve(job, work)
+
+    assert report.counts["확인필요"] == 1 and report.counts["성공"] == 0
+    assert _files(job.folder / "승인대기") == [ACME_PO.name]
+    assert load_records(job)[-1]["상태"] == "승인대기"
+    note = (job.folder / "확인필요" / f"{ACME_PO.name}.txt").read_text(encoding="utf-8")
+    assert "승인대기의 이 파일을 지금 규칙으로 알아보지 못했습니다" in note
+
+
+def test_approval_counts_under_rules_read_at_start(env, monkeypatch):
+    """승인 실행 중 규칙.yaml 이 바뀌어도 승인 수는 추출 · 대조에 쓴 규칙의 지문으로 센다."""
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    want = form_fingerprint(job.rules_path, "ACME")
+    original = job.rules_path.read_text(encoding="utf-8")
+    real = job_run.verify
+
+    def verify_then_edit(result, path):
+        checks = real(result, path)
+        job.rules_path.write_text(original.replace('납품처:     "오른쪽:Deliver To:"', '납품처:     "B7"'),
+                                  encoding="utf-8")
+        return checks
+
+    monkeypatch.setattr(job_run, "verify", verify_then_edit)
+
+    assert approve(job, work).counts["성공"] == 1
+    assert job.fingerprints["ACME"] == want and job.approvals["ACME"] == 1

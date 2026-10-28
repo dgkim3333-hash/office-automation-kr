@@ -96,6 +96,7 @@ class Rules:
     sheet_order: list[str] = field(default_factory=list)  # 장부 탭 순서(판별 순서와 따로)
     excel_forms: list[ExcelForm] = field(default_factory=list)  # 고객별 엑셀 PO 읽는 법(판별 순서)
     company_form: CompanyForm | None = None  # 엑셀 PO 를 바꿔 넣을 회사 양식
+    raw: dict | None = None  # 규칙.yaml 을 yaml 로 읽은 그대로(양식 지문을 같은 글자에서 계산할 때 씀)
 
     def get(self, name):
         return next((d for d in self.doc_types if d.name == name), None)
@@ -104,9 +105,16 @@ class Rules:
 def load_rules(path) -> Rules:
     path = Path(path)
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise RuleError(f"규칙 파일이 없습니다: {path}") from None
+    return rules_from_text(text)
+
+
+def rules_from_text(text: str) -> Rules:
+    """규칙.yaml 글자에서 규칙을 만든다. 한 번 읽은 글자로 규칙과 지문을 함께 계산할 때 쓴다."""
+    try:
+        data = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise RuleError(f"규칙 파일 문법 오류(들여쓰기·따옴표 확인): {e}") from None
 
@@ -128,6 +136,7 @@ def load_rules(path) -> Rules:
         _sheet_order(data.get("시트순서"), [d.name for d in doc_types]),
         [_excel_form(str(name), body, by_name) for name, body in excel.items()],
         _company_form(data.get("회사양식")),
+        data,
     )
 
 

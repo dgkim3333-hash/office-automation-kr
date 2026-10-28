@@ -10,7 +10,7 @@
 import csv
 from pathlib import Path
 
-from app.forms import form_fingerprint, form_key  # noqa: F401  (바깥에서 app.approval 로 부른다)
+from app.forms import form_fingerprint, form_key, rules_form_fingerprint  # noqa: F401  (바깥에서 app.approval 로 부른다)
 from app.job_run import (
     REVIEW, WAITING, WAITING_CHECKS, RunReport, _current_state, _documents, check_file_info, file_fingerprint,
     job_lock, load_records, run_job,
@@ -22,9 +22,15 @@ NOTHING = "승인할 문서가 없습니다."
 FINISHED = ("성공", "중복")  # 이 상태가 된 복사본은 더 승인할 것이 없으므로 치운다
 
 
-def _current_count(job: Job, key: str) -> int:
-    """그 양식의 승인 수. 규칙이 저장된 지문과 다르면 그 양식만 0 으로 되돌리고 새 지문을 저장한다."""
-    fingerprint = form_fingerprint(job.rules_path, key)
+def _current_count(job: Job, key: str, rules=None) -> int:
+    """그 양식의 승인 수. 규칙이 저장된 지문과 다르면 그 양식만 0 으로 되돌리고 새 지문을 저장한다.
+
+    rules(이번 실행이 읽은 규칙)가 있으면 그 글자에서 지문을 계산한다(실행 중 규칙.yaml 이 바뀌어도 추출과 같은 규칙).
+    """
+    if rules is not None and getattr(rules, "raw", None) is not None:
+        fingerprint = rules_form_fingerprint(rules, key)
+    else:
+        fingerprint = form_fingerprint(job.rules_path, key)
     if job.fingerprints.get(key) != fingerprint:
         job.approvals[key] = 0
         job.fingerprints[key] = fingerprint
@@ -34,7 +40,7 @@ def _current_count(job: Job, key: str) -> int:
 
 def approval_gate(job: Job, rules, result) -> bool:
     """True 면 결과를 내지 않고 승인대기로 보낸다(그 양식의 승인 수가 10 미만)."""
-    return _current_count(job, form_key(result)) < REQUIRED
+    return _current_count(job, form_key(result), rules) < REQUIRED
 
 
 def approve(job: Job, work) -> RunReport:
@@ -51,10 +57,16 @@ def approve(job: Job, work) -> RunReport:
         return RunReport(message="\n".join([NOTHING] + warnings))
 
     approved: list[str] = []
+    run_rules = []  # 이번 승인 실행이 읽은 규칙. 승인 실행은 출력 직전에 gate 를 부르므로 거기서 받아 둔다
+
+    def never(job_, rules, result):
+        run_rules[:] = [rules]
+        return False
 
     def counted(job_, result):
         key = form_key(result)
-        _current_count(job_, key)  # 규칙이 바뀐 뒤 처음 승인한 건이면 그 양식은 0 에서 센다
+        # 규칙이 바뀐 뒤 처음 승인한 건이면 그 양식은 0 에서 센다(지문은 이번 실행이 읽은 규칙에서)
+        _current_count(job_, key, run_rules[0] if run_rules else None)
         job_.approvals[key] = job_.approvals.get(key, 0) + 1
         approved.append(key)
         save_job(job_)
@@ -63,7 +75,7 @@ def approve(job: Job, work) -> RunReport:
         _clear_finished(job_, waiting, warnings)
         _clear_orphan_checks(job_, waiting, warnings)
 
-    report = run_job(job, work, source_dir=waiting, gate=lambda *a: False, on_success=counted, after=cleanup)
+    report = run_job(job, work, source_dir=waiting, gate=never, on_success=counted, after=cleanup)
 
     lines = [report.message] if report.message else []
     if approved:

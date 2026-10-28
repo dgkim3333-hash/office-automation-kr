@@ -19,7 +19,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 from app.excel_extract import read_excel
 from app.extract import extract
-from app.forms import form_fingerprint, form_key
+from app.forms import form_key, rules_form_fingerprint
 from app.jobs import Job, _folder_title, list_jobs, save_job
 from app.ledger import ITEMS_SHEET, Ledger, LedgerLocked, is_locked
 from app.local_guard import LocalOnlyError, check_work_dir
@@ -29,12 +29,13 @@ from app.organize import free_name
 from app.outputs import (
     _same_value, _text, company_form_name, company_rows, company_workbook, read_back, write_check_file,
 )
-from app.rules import RuleError, load_rules
+from app.rules import RuleError, rules_from_text
 from app.verify import failed, verify
 
 LEDGER_NAME = "누적장부_{제목}.xlsx"  # 출력 폴더에 둔다
 RECORD_FILE = "처리기록.csv"  # 작업 폴더
-RECORD_COLUMNS = ["지문", "파일", "문서종류", "번호", "상태", "규칙지문", "날짜"]
+RECORD_COLUMNS = ["지문", "파일", "문서종류", "번호", "상태", "규칙지문", "날짜", "양식지문"]
+# 양식지문 = 그 문서 양식(app.forms)의 지문. 승인하지 않은 문서를 그 양식 규칙이 바뀐 뒤에만 다시 처리할 때 쓴다
 LOG_FILE = "처리로그.csv"  # 작업 폴더. 아무도 안 볼 때(자동 실행)를 위한 건별 기록
 LOCK_FILE = "실행중.lock"
 MASTER_FILE = "고객마스터.xlsx"  # 작업 폴더들의 위(work) 에 있는 공용 파일
@@ -64,6 +65,7 @@ STAMP_FORM = "form_fingerprint"  # 승인대기 대조표 속성: 만들 때의 
 STAMP_FILE = "file_fingerprint"  # 승인대기 대조표 속성: 만들 때의 복사본 지문
 REMADE_RULES = "규칙이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 REMADE_MISSING = "대조표가 없어 새로 만들었습니다. 보고 승인하세요"
+NOT_DETECTED_WAITING = "승인대기의 이 파일을 지금 규칙으로 알아보지 못했습니다. 규칙을 고치거나 복사본을 지워 거절하세요"
 REMADE_FILE = "승인대기의 파일이 대조표를 만든 뒤 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 APPROVAL_RETRY_NOTE = ("고친 뒤(규칙.yaml · 고객마스터 등) 다시 승인하면 다시 확인합니다. "
                        f"승인하지 않을 문서면 {WAITING} 폴더의 그 복사본을 지우세요.")
@@ -356,6 +358,8 @@ class _Run:
         self.waiting_unknown = False         # 지문을 읽지 못한 복사본이 있음
         self.checks_index = None             # 승인대기 대조표(waiting_checks), 처음 쓸 때 읽음
         self.remade: list[str] = []          # 승인 실행에서 대조표를 새로 만든 문서
+        self.rejected = None                 # 지금 처리하는 파일이 승인하지 않은 문서면 그 승인대기 기록
+        self.form_fps: dict[str, str] = {}
 
     # 준비
 
@@ -384,9 +388,15 @@ class _Run:
         if stop:
             return self._stop(stop)
         try:
-            self.rules = load_rules(self.job.rules_path)
-            self.rules_fp = rules_fingerprint(self.job)
-        except (RuleError, OSError) as e:
+            # 규칙과 모든 지문(규칙지문 · 양식지문 · 대조표 지문)을 한 번 읽은 같은 글자에서 계산한다.
+            # 실행 중 규칙.yaml 이 바뀌어도 A 규칙으로 뽑은 값에 B 지문이 붙지 않게
+            raw = Path(self.job.rules_path).read_bytes()
+            self.rules = rules_from_text(raw.decode("utf-8"))
+            self.rules_fp = hashlib.sha256(raw).hexdigest()[:16]
+        except FileNotFoundError:
+            return self._stop(f"규칙.yaml 오류: 규칙 파일이 없습니다: {self.job.rules_path}\n"
+                              f"Code 탭에서 「{self.job.title} 작업 규칙 고쳐 줘」라고 말하세요.")
+        except (RuleError, OSError, UnicodeDecodeError) as e:
             return self._stop(f"규칙.yaml 오류: {e}\nCode 탭에서 「{self.job.title} 작업 규칙 고쳐 줘」라고 말하세요.")
         if self.job.output_mode in COMPANY_MODES and self.rules.company_form is None:
             return self._stop(
@@ -448,6 +458,7 @@ class _Run:
     # 한 건
 
     def _one(self, path: Path):
+        self.rejected = None
         try:
             age = self.now.timestamp() - path.stat().st_mtime
         except OSError:
@@ -462,6 +473,9 @@ class _Run:
             return
         if self._skip(fp):  # 이미 처리한 원본은 PDF 뷰어에 열려 있어도 보류로 세지 않는다
             return
+        row = self.state.get(fp) or {}
+        if not self.approving and row.get("상태") == "승인대기":
+            self.rejected = row  # 친구가 복사본을 지워 승인하지 않은 문서(_skip 이 남긴 경우)
         if os.access(path, os.W_OK) and is_locked(path):  # 읽기 전용 파일은 잠김 검사가 늘 실패하므로 건너뜀
             self._done(path, "보류", HELD_REASON)
             return
@@ -471,7 +485,12 @@ class _Run:
             self._review(path, fp, None, f"파일을 읽지 못함: {e}")
             return
         if result.doc_type is None and result.has_text:
+            if self.approving:  # 승인대기의 복사본은 이 작업 몫이므로 조용히 두지 않는다
+                self._review(path, fp, result, NOT_DETECTED_WAITING)
             return  # 판별 실패: 다른 작업 몫일 수 있으므로 기록하지 않고 그대로 둔다
+        if (self.rejected is not None and result.doc_type is not None
+                and self._form_fp(result) == self.rejected.get("양식지문")):
+            return  # 그 양식 규칙이 그대로: 친구가 거절한 값 그대로이므로 건너뛴다
         if result.review_reason:
             self._review(path, fp, result, result.review_reason)
             return
@@ -498,9 +517,10 @@ class _Run:
         if self.approving:
             return False  # 승인은 사람이 누른 실행이므로 승인대기 · 확인필요도 다시 확인한다
         if status == "승인대기":
-            # 승인하지 않은 문서(친구가 복사본을 지움)는 규칙을 고친 뒤 다시 처리한다(설계 12-1).
+            # 승인하지 않은 문서(친구가 복사본을 지움)는 그 양식 규칙을 고친 뒤 다시 처리한다(설계 12-1).
             # 복사본이 아직 승인대기에 있으면 규칙이 바뀌어도 건너뛴다(승인 때 대조표를 새로 만든다)
-            return (row.get("규칙지문") == self.rules_fp or self.waiting_unknown or fp in self.waiting_fps)
+            # 다시 처리하는지(그 양식 지문이 바뀌었는지)는 추출한 뒤 _one 에서 본다. 다시 처리하면 늘 승인대기로 간다
+            return self.waiting_unknown or fp in self.waiting_fps or not row.get("양식지문")
         if status == "확인필요":
             return row.get("날짜") == self.today and row.get("규칙지문") == self.rules_fp
         return False  # 보류: 다음 실행 때 다시
@@ -530,7 +550,8 @@ class _Run:
             if reason:  # 친구가 대조표에서 본 값이 아니므로 내보내지 않는다
                 self._remake_check(path, fp, result, checks, reason)
                 return
-        if self.gate is not None and self.gate(self.job, self.rules, result):
+        if self.rejected is not None or (self.gate is not None and self.gate(self.job, self.rules, result)):
+            # 승인하지 않은 문서를 다시 처리하면 승인 수와 상관없이 늘 승인대기로(자동 실행이 내보내지 않음)
             self._to_waiting(path, fp, result, checks)
             return
         self._write(path, fp, result, key, checks, master_row)
@@ -542,8 +563,14 @@ class _Run:
             self.checks_index = waiting_checks(self.job)
         return self.checks_index
 
+    def _form_fp(self, result) -> str:
+        key = form_key(result)
+        if key not in self.form_fps:
+            self.form_fps[key] = rules_form_fingerprint(self.rules, key)
+        return self.form_fps[key]
+
     def _stamps(self, fp, result) -> dict:
-        return {STAMP_FORM: form_fingerprint(self.job.rules_path, form_key(result)), STAMP_FILE: fp}
+        return {STAMP_FORM: self._form_fp(result), STAMP_FILE: fp}
 
     def _unseen(self, path, fp, result) -> str | None:
         """이 복사본의 대조표가 지금 값과 같은 규칙 · 같은 파일로 만든 것인지. 아니면 그 사유."""
@@ -761,6 +788,7 @@ class _Run:
             "상태": status,
             "규칙지문": self.rules_fp,
             "날짜": self.today,
+            "양식지문": self._form_fp(result) if result is not None and result.doc_type is not None else "",
         }
         try:
             _append_record(self.job, row)
@@ -789,8 +817,8 @@ class _Run:
             note.write_text(f"원본: {path}\n사유: {reason}\n\n{hint}\n", encoding="utf-8")
         except OSError as e:
             self.warnings.append(f"경고: 확인필요 사유 파일을 쓰지 못함 ({path.name}): {e}")
-        if not self.approving:
-            # 승인 실행에서는 승인대기 상태를 그대로 둔다. 확인필요로 덮으면 다음 날 자동 실행이 입력 폴더의 원본을
+        if not (self.approving or self.rejected is not None):
+            # 승인 실행 · 승인하지 않은 문서는 승인대기 상태를 그대로 둔다. 확인필요로 덮으면 다음 날 자동 실행이 입력 폴더의 원본을
             # 다시 처리해 승인대기에 복사본을 하나 더(_2) 만든다. 복사본은 승인대기에 남아 고친 뒤 다시 승인할 수 있다
             self._record(path, fp, result, "확인필요")
         self._done(path, "확인필요", reason)

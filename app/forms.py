@@ -35,7 +35,17 @@ def form_fingerprint(rules_path: Path, key: str) -> str:
     엑셀양식이면 그 엑셀양식과 연결된 문서종류 + 모든 엑셀양식의 판별 부분,
     아니면 그 문서종류 + 모든 문서종류의 판별 부분. 다른 양식의 추출 규칙을 고쳐도 값이 바뀌지 않는다.
     """
-    data = yaml.safe_load(Path(rules_path).read_text(encoding="utf-8")) or {}
+    return form_fingerprint_data(yaml.safe_load(Path(rules_path).read_text(encoding="utf-8")), key)
+
+
+def rules_form_fingerprint(rules, key: str) -> str:
+    """이미 읽은 규칙(Rules.raw)에서 계산한 양식 지문. 실행 중 규칙.yaml 이 바뀌어도 추출에 쓴 규칙과 같다."""
+    return form_fingerprint_data(rules.raw, key)
+
+
+def form_fingerprint_data(data, key: str) -> str:
+    """form_fingerprint 와 같되 규칙.yaml 을 yaml 로 읽은 값에서 계산한다."""
+    data = data if isinstance(data, dict) else {}
     part = {"회사양식": data.get("회사양식")}
     excel = _named(data.get("엑셀양식"), key)
     if excel is not None:
