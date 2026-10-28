@@ -12,6 +12,8 @@ REVIEW = "확인필요"
 LEDGER_FILE = "누적장부.xlsx"
 LOG_FILE = "처리로그.csv"
 RULES_FILE = "규칙.yaml"
+MASTER_FILE = "고객마스터.xlsx"
+OUTPUT = "출력"  # 문서별 결과 엑셀(회사 양식·추출결과)
 
 NEED_INIT = "설치.bat를 먼저 실행하세요"
 

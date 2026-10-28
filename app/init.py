@@ -4,8 +4,9 @@ from pathlib import Path
 
 from app import config
 from app.local_guard import LocalOnlyError, check_work_dir
+from app.master import write_example
 
-SUBFOLDERS = [config.INBOX, f"{config.INBOX}/{config.DUPLICATES}", config.ORGANIZED, config.REVIEW]
+SUBFOLDERS = [config.INBOX, f"{config.INBOX}/{config.DUPLICATES}", config.ORGANIZED, config.REVIEW, config.OUTPUT]
 
 
 class InitError(Exception):
@@ -69,6 +70,9 @@ def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_folder
     rules = work_dir / config.RULES_FILE
     if not rules.exists():
         shutil.copyfile(repo_root / config.EXAMPLE_RULES, rules)
+    master = work_dir / config.MASTER_FILE
+    if not master.exists():  # 있으면 사용자가 채운 것이므로 건드리지 않는다
+        write_example(master)
     config.work_dir_file(repo_root).write_text(str(work_dir) + "\n", encoding="utf-8")
 
     print(f"작업 폴더: {work_dir}")
