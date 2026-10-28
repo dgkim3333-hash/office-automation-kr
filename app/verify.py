@@ -18,6 +18,8 @@ from app.rules import CheckSpec
 NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 DATE = re.compile(r"(?=(?<!\d)(\d{1,4}[/\-]\d{1,2}[/\-]\d{1,4})(?!\d))")  # 겹쳐서 찾음. to_date 로 바뀌는 것만 날짜
 NOT_FOUND = "원본에 없음"
+# 엑셀은 100.00 을 정수 100 으로 저장해 금액의 소수 자리를 알 수 없다. 줄 검산은 최소 이 자리까지 반올림해 비교한다
+EXCEL_MIN_PLACES = 2
 # 번호 앞뒤에 이 글자가 붙어 있으면 더 긴 번호의 일부로 본다(INV-2026-1023 은 INV-2026-10231 의 일부)
 ID_CHARS = r"A-Za-z0-9_\-/"
 
@@ -50,7 +52,7 @@ def verify(result, source_path) -> list[Check]:
         return []
     source = _excel_source(source_path) if result.is_excel else _pdf_source(source_path)
     columns = result.doc_type.check or CheckSpec(None, [], None)
-    return (_source_checks(result, source) + _line_checks(result.table, columns)
+    return (_source_checks(result, source) + _line_checks(result.table, columns, result.is_excel)
             + _total_checks(result))
 
 
@@ -165,7 +167,8 @@ def _has_number_text(source, value: str) -> bool:
         return False
     if source.cells is not None:  # 엑셀: 칸 하나의 값과 같아야 함
         return value.strip() in source.cells
-    pattern = rf"(?<![{ID_CHARS}.]){re.escape(value)}(?![{ID_CHARS}]|\.[A-Za-z0-9])"  # 문장 끝 마침표는 괜찮음
+    # 앞: 번호 글자나 '숫자.' 뒤면 일부(1.2026). 'No.INV-1' 처럼 글자 뒤 마침표는 괜찮음. 뒤: 문장 끝 마침표는 괜찮음
+    pattern = rf"(?<![{ID_CHARS}])(?<!\d\.){re.escape(value)}(?![{ID_CHARS}]|\.[A-Za-z0-9])"
     return re.search(pattern, source.text) is not None
 
 
@@ -182,7 +185,7 @@ def _places(number: Decimal) -> int:
 
 # --- 3. 줄 검산 ---
 
-def _line_checks(table, columns) -> list[Check]:
+def _line_checks(table, columns, is_excel=False) -> list[Check]:
     checks = []
     for n, row in enumerate(table or [], 1):
         item = f"{n}줄 금액"
@@ -192,13 +195,13 @@ def _line_checks(table, columns) -> list[Check]:
             continue
         product = quantity * price
         checks.append(Check(item, f"{_show(quantity)} x {_show(price)} = {_show(product)}",
-                            _show(amount), _rounds_to(product, amount)))
+                            _show(amount), _rounds_to(product, amount, EXCEL_MIN_PLACES if is_excel else 0)))
     return checks
 
 
-def _rounds_to(product: Decimal, amount: Decimal) -> bool:
-    """product 를 amount 의 소수 자리로 반올림(사사오입 · 은행원식 중 하나)하면 amount 인가."""
-    step = Decimal(1).scaleb(amount.as_tuple().exponent)
+def _rounds_to(product: Decimal, amount: Decimal, min_places: int = 0) -> bool:
+    """product 를 amount 의 소수 자리(최소 min_places)로 반올림(사사오입 · 은행원식 중 하나)하면 amount 인가."""
+    step = Decimal(1).scaleb(min(amount.as_tuple().exponent, -min_places))
     try:
         return any(product.quantize(step, rounding=mode) == amount for mode in (ROUND_HALF_UP, ROUND_HALF_EVEN))
     except InvalidOperation:

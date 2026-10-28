@@ -39,6 +39,7 @@ class CheckSpec:
     quantity: str = "수량"
     price: str = "단가"
     amount: str = "금액"
+    named: frozenset = field(default=frozenset(), compare=False, repr=False)  # 규칙에 직접 적은 열 키
 
 
 @dataclass
@@ -245,6 +246,8 @@ def _doc_type(name, body) -> DocType:
             raise RuleError(f"{where} 파일명의 {{{n}:{spec}}} 처럼 ':' 서식은 '형식: 날짜' 필드에만 쓸 수 있습니다.")
 
     table = _table(where, body.get("표"))
+    if "검산" in body and body["검산"] is None:
+        raise RuleError(f"{where} 검산에 적은 것이 없습니다. 소계 · 부대비용 · 합계 중 하나 이상을 적거나 검산 줄을 지우세요.")
     check = _check_spec(where, body.get("검산"), fields)
     _check_columns(where, check, table and table.columns, "표의")
 
@@ -264,12 +267,17 @@ CHECK_COLUMN_KEYS = (("수량열", "quantity"), ("단가열", "price"), ("금액
 
 
 def _check_columns(where, check, columns, what):
-    """검산에 쓰는 품목 열(적은 이름 또는 기본 수량 · 단가 · 금액)이 열 목록에 있어야 한다."""
+    """검산에 쓰는 품목 열이 열 목록에 있어야 한다.
+
+    금액열은 소계 · 합계 검산이 있으면(기본 이름이어도) 꼭 있어야 한다. 수량열 · 단가열은 규칙에 직접 적었을 때만
+    검사한다. 기본 이름이 표에 없으면 줄 검산이 해당 없음이 될 뿐이다(단가 없는 표도 합계 검산은 할 수 있게).
+    """
     if check is None or columns is None:
         return
     for key, attr in CHECK_COLUMN_KEYS:
         name = getattr(check, attr)
-        if name not in columns:
+        needed = key in check.named or (attr == "amount" and (check.subtotal or check.total))
+        if needed and name not in columns:
             raise RuleError(
                 f"{where} 검산의 {key} '{name}' 가 {what} 열 목록에 없습니다. "
                 f"검산 아래에 {key}: 열이름 처럼 실제 열 이름을 적으세요."
@@ -311,6 +319,7 @@ def _check_spec(where, spec, fields) -> CheckSpec | None:
         extras=[str(n) for n in extras],
         total=None if total is None else str(total),
         **columns,
+        named=frozenset(k for k, _ in CHECK_COLUMN_KEYS if k in spec),
     )
 
 

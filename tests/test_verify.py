@@ -191,6 +191,34 @@ def test_number_field_before_sentence_period_passes(tmp_path, rules):
     assert failed(verify(result, pdf)) == []
 
 
+def test_number_field_right_after_label_period_passes(tmp_path, rules):
+    pdf = _pdf(tmp_path / "nodot.pdf", ["Memo No.M-2026-01", "Date: 10/15/2026", "Total: $1,234.50"])
+    result = extract(pdf, rules)
+    assert result.fields["메모번호"] == "M-2026-01"
+    assert failed(verify(result, pdf)) == []
+
+
+def test_number_field_after_digit_period_is_partial(tmp_path, rules):
+    pdf = _pdf(tmp_path / "part.pdf", ["Memo No: M-1", "Ref 1.2026", "Date: 10/15/2026", "Total: $1,234.50"])
+    result = extract(pdf, rules)
+    result.fields["메모번호"] = "2026"  # 1.2026 의 일부, 10/15/2026 의 일부
+    assert _items(verify(result, pdf)) == ["메모번호"]
+
+
+def test_line_check_without_price_is_not_applicable_with_total_only(tmp_path):
+    data = yaml.safe_load(yaml.safe_dump(TEST_RULES, allow_unicode=True))
+    bill = data["문서종류"]["Bill"]
+    bill["표"].update(열=["줄", "품번", "수량", "비고", "금액"], 금액열=["금액"])
+    bill["검산"] = {"합계": "합계금액"}
+    path = tmp_path / "규칙.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    pdf = _bill(tmp_path, [("2", "50.00", "100.00")], "100.00", "0.00", "100.00")
+    checks = verify(extract(pdf, load_rules(path)), pdf)
+    assert next(c for c in checks if c.item == "1줄 금액").ok is None
+    assert next(c for c in checks if c.item == "품목 합 = 합계").ok is True
+    assert failed(checks) == []
+
+
 def test_excel_number_field_must_equal_a_whole_cell(tmp_path, example_rules):
     wb = openpyxl.Workbook()
     wb.active["A1"], wb.active["B1"] = "PO Number:", "  PO-T-12 "
@@ -380,3 +408,13 @@ def _raw_float(path, placeholder, raw):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         for n, data in files.items():
             z.writestr(n, data)
+
+
+def test_excel_int_amount_rounds_to_two_places(tmp_path, example_rules):
+    # 엑셀은 100.00 을 정수 100 으로 저장한다. 2 x 50.2 = 100.4 가 100 으로 통과하면 안 된다
+    wb = openpyxl.load_workbook(ORDERS / "고객오더_ACME_PO-ACME-2026-0417.xlsx")
+    ws = wb.active
+    ws["D14"], ws["F14"], ws["G14"] = 2, 50.2, 100
+    path = tmp_path / "po.xlsx"
+    wb.save(path)
+    assert _items(verify(read_excel(path, example_rules), path)) == ["1줄 금액"]

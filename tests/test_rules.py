@@ -150,9 +150,36 @@ def test_check_columns_can_be_named(tmp_path):
     assert spec.subtotal == "소계" and spec.total == "합계금액"
 
 
-def test_default_check_column_missing_from_table_is_rule_error(tmp_path):
-    path = _broken(tmp_path, _renamed_table)  # 검산 열을 안 적으면 기본 '수량' 을 찾는다
-    with pytest.raises(RuleError, match="수량열 '수량'"):
+def test_default_amount_column_missing_with_sum_check_is_rule_error(tmp_path):
+    path = _broken(tmp_path, _renamed_table)  # 소계 · 합계 검산이 있으면 기본 '금액' 열이 있어야 한다
+    with pytest.raises(RuleError, match="금액열 '금액'"):
+        load_rules(path)
+
+
+def test_total_only_check_without_price_column_loads(tmp_path):
+    def change(d):  # 단가 열이 없는 품목 표에 합계 검산만
+        d["표"].update(열=["줄", "품번", "품명", "수량", "비고", "금액"], 금액열=["금액"])
+        d["검산"] = {"합계": "합계금액"}
+    spec = load_rules(_broken(tmp_path, change)).get("Invoice").check
+    assert spec.total == "합계금액" and spec.price == "단가"
+
+
+def test_default_quantity_price_are_not_required(tmp_path):
+    def change(d):
+        _renamed_table(d)
+        d["검산"].update(금액열="Amount")  # 수량 · 단가 기본 이름은 표에 없어도 됨(줄 검산 해당 없음)
+    assert load_rules(_broken(tmp_path, change)).get("Invoice").check.amount == "Amount"
+
+
+def test_named_amount_column_checked_even_without_sum(tmp_path):
+    path = _broken(tmp_path, lambda d: d.update(검산={"금액열": "Amount"}))
+    with pytest.raises(RuleError, match="금액열 'Amount'"):
+        load_rules(path)
+
+
+def test_empty_check_block_is_rule_error(tmp_path):
+    path = _broken(tmp_path, lambda d: d.update(검산=None))  # "검산:" 만 쓰고 내용 없음
+    with pytest.raises(RuleError, match="검산에 적은 것이 없습니다"):
         load_rules(path)
 
 
@@ -165,11 +192,20 @@ def test_named_check_column_missing_from_table_is_rule_error(tmp_path):
 def test_check_column_missing_from_excel_items_is_rule_error(tmp_path):
     data = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     data["문서종류"]["PO"]["검산"] = {"합계": "합계금액"}
-    data["엑셀양식"]["HANIL"]["품목"]["열"] = {"줄": "A", "품번": "B", "품명": "C", "수량": "D", "Price": "F", "금액": "G"}
-    data["엑셀양식"]["HANIL"]["품목"]["금액열"] = ["Price", "금액"]
+    data["엑셀양식"]["HANIL"]["품목"]["열"] = {"줄": "A", "품번": "B", "품명": "C", "수량": "D", "단가": "F", "Amount": "G"}
+    data["엑셀양식"]["HANIL"]["품목"]["금액열"] = ["단가", "Amount"]
     path = tmp_path / "규칙.yaml"
     path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
-    with pytest.raises(RuleError, match="HANIL.*단가열 '단가'"):
+    with pytest.raises(RuleError, match="HANIL.*금액열 '금액'"):
+        load_rules(path)
+
+
+def test_named_price_column_missing_from_excel_items_is_rule_error(tmp_path):
+    data = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    data["문서종류"]["PO"]["검산"] = {"합계": "합계금액", "단가열": "Price"}
+    path = tmp_path / "규칙.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(RuleError, match="ACME.*단가열 'Price'"):
         load_rules(path)
 
 
