@@ -219,6 +219,12 @@ def load_job(folder: Path) -> Job:
         return data[key]
 
     try:
+        _check_mode(str(need("출력방식")))  # 잘못된 방식이면 결과 없이 성공으로 기록되므로 읽을 때 막는다
+    except JobError as e:
+        raise JobError(f"작업 설정의 값이 올바르지 않습니다: {path} ({e})") from e
+    except KeyError as e:
+        raise JobError(f"작업 설정에 {e.args[0]} 항목이 없습니다: {path}") from e
+    try:
         return Job(
             folder=folder,
             number=int(need("번호")),

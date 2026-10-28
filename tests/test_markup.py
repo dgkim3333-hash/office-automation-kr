@@ -250,7 +250,7 @@ def test_company_form_uses_markup_columns(env):
     _markup(work / MARKUP_FILE, [["A", 3, None], ["B", 3, 3]])
     _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10"), ("B", 3, "0.37")])
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1, report.message
     rows = _sheet(out / "본사PO_PO-1.xlsx", "HQ_PO")
@@ -271,7 +271,7 @@ def test_missing_part_goes_to_review_listing_parts(env):
     _markup(work / MARKUP_FILE, [["A", 3, None]])
     _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10"), ("B-77", 3, "0.37"), ("C-88", 1, "5.00")])
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["확인필요"] == 1 and report.counts["성공"] == 0
     note = (job.folder / "확인필요" / "po1.xlsx.txt").read_text(encoding="utf-8")
@@ -282,7 +282,7 @@ def test_missing_part_goes_to_review_listing_parts(env):
 def test_missing_markup_file_goes_to_review(env):
     work, inp, out, job = env
     _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10")])
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
     assert report.counts["확인필요"] == 1
     assert MARKUP_FILE in (job.folder / "확인필요" / "po1.xlsx.txt").read_text(encoding="utf-8")
     assert list(out.iterdir()) == []
@@ -292,7 +292,7 @@ def test_bad_markup_file_goes_to_review(env):
     work, inp, out, job = env
     _markup(work / MARKUP_FILE, [["A", 30, None]])
     _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10")])
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
     assert report.counts["확인필요"] == 1
     assert "0 이상 10 이하" in (job.folder / "확인필요" / "po1.xlsx.txt").read_text(encoding="utf-8")
 
@@ -301,11 +301,11 @@ def test_adding_missing_part_retries_same_day(env):
     work, inp, out, job = env
     _markup(work / MARKUP_FILE, [["A", 3, None]])
     _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10"), ("B", 3, "0.37")])
-    assert run_job(job, work).counts["확인필요"] == 1
-    assert run_job(job, work).counts["확인필요"] == 0  # 같은 날 · 그대로면 다시 시도하지 않는다
+    assert run_job(job, work, gate=None).counts["확인필요"] == 1
+    assert run_job(job, work, gate=None).counts["확인필요"] == 0  # 같은 날 · 그대로면 다시 시도하지 않는다
 
     _markup(work / MARKUP_FILE, [["A", 3, None], ["B", 2, None]])
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1, report.message
     assert (out / "본사PO_PO-1.xlsx").exists()
@@ -317,7 +317,7 @@ def test_markup_check_rows_in_check_file(env):
     work, inp, out, job = env
     _markup(work / MARKUP_FILE, [["A", 3, None], ["B", 3, 3]])
     _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10"), ("B", 3, "0.37")])
-    run_job(job, work)
+    run_job(job, work, gate=None)
 
     rows = list(openpyxl.load_workbook(job.folder / "검산" / "검산_PO-1.xlsx").active.iter_rows(values_only=True))
     lines = {r[0]: r for r in rows[2:]}
@@ -382,7 +382,7 @@ def test_no_markup_columns_means_no_markup_file_needed(env):
     job.rules_path.write_text(NO_MARKUP_RULES, encoding="utf-8")
     _po(inp / "po1.xlsx", "PO-1", [("NOT-IN-ANY-TABLE", 10, "0.10")])
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1, report.message
     assert not (work / MARKUP_FILE).exists()
@@ -393,7 +393,7 @@ def test_ledger_mode_ignores_markup(env):
     job.output_mode = "누적장부"
     save_job(job)
     _po(inp / "po1.xlsx", "PO-1", [("NOT-IN-ANY-TABLE", 10, "0.10")])
-    assert run_job(job, work).counts["성공"] == 1  # 누적장부는 고객 PO 값 그대로, 마크업표 없어도 됨
+    assert run_job(job, work, gate=None).counts["성공"] == 1  # 누적장부는 고객 PO 값 그대로, 마크업표 없어도 됨
 
 
 # --- check 명령 ---
@@ -518,7 +518,7 @@ def test_missing_part_with_leading_zero_gets_text_format_hint(env):
     _markup(work / MARKUP_FILE, [[123, 3, None]])  # 엑셀이 0123 을 숫자 123 으로 바꿔 둔 마크업표
     _po(inp / "po1.xlsx", "PO-1", [("0123", 1, "1.00")])
 
-    assert run_job(job, work).counts["확인필요"] == 1
+    assert run_job(job, work, gate=None).counts["확인필요"] == 1
     note = (job.folder / "확인필요" / "po1.xlsx.txt").read_text(encoding="utf-8")
     assert "마크업표에 없는 파트넘버: 0123." in note
     assert "앞자리가 0 인 품번은 마크업표 칸을 텍스트 서식으로 적어야 맞습니다" in note
@@ -528,7 +528,7 @@ def test_missing_part_without_leading_zero_has_no_hint(env):
     work, inp, out, job = env
     _markup(work / MARKUP_FILE, [["A", 3, None]])
     _po(inp / "po1.xlsx", "PO-1", [("B-10", 1, "1.00")])
-    run_job(job, work)
+    run_job(job, work, gate=None)
     assert "텍스트 서식" not in (job.folder / "확인필요" / "po1.xlsx.txt").read_text(encoding="utf-8")
 
 
@@ -577,7 +577,7 @@ def test_old_record_rows_without_markup_column_still_load(env):
         encoding="utf-8-sig")
     _markup(work / MARKUP_FILE, [["A", 3, None]])
     _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10")])
-    assert run_job(job, work).counts["성공"] == 1
+    assert run_job(job, work, gate=None).counts["성공"] == 1
     records = load_records(job)
     assert records[0]["양식지문"] == "f" and records[0].get("마크업지문", "") == ""
     assert records[1]["상태"] == "성공" and len(records[1]["마크업지문"]) == 16

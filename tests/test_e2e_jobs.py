@@ -81,7 +81,7 @@ def test_pdf_job_counts_and_leaves_originals(env):
     work, out, pdf_job, _ = env
     before = _snapshot(pdf_job.input_dir)
 
-    report = run_job(pdf_job, work)
+    report = run_job(pdf_job, work, gate=None)
 
     assert report.counts == {"성공": 4, "중복": 0, "확인필요": 1, "승인대기": 0, "보류": 0}
     assert _snapshot(pdf_job.input_dir) == before
@@ -99,13 +99,13 @@ def test_pdf_job_counts_and_leaves_originals(env):
 @pytest.mark.parametrize("sheet", ["Invoice", "DM"])
 def test_pdf_job_ledger_matches_expected(env, sheet):
     work, out, pdf_job, _ = env
-    run_job(pdf_job, work)
+    run_job(pdf_job, work, gate=None)
     _compare_sheet(_records(out / "누적장부_PDF 장부.xlsx", sheet), _records(EXPECTED, sheet), "원본파일", sheet)
 
 
 def test_pdf_job_items_match_expected(env):
     work, out, pdf_job, _ = env
-    run_job(pdf_job, work)
+    run_job(pdf_job, work, gate=None)
     key = lambda r: (r["문서종류"], r["문서번호"], str(r["줄"]))  # noqa: E731
     got = sorted(_records(out / "누적장부_PDF 장부.xlsx", "품목"), key=key)
     expected = sorted((r for r in _records(EXPECTED, "품목") if r["문서종류"] != "PO"), key=key)
@@ -119,7 +119,7 @@ def test_excel_job_both_matches_expected_forms_and_ledger(env):
     work, out, _, excel_job = env
     before = _snapshot(excel_job.input_dir)
 
-    report = run_job(excel_job, work)
+    report = run_job(excel_job, work, gate=None)
 
     assert report.counts["성공"] == 2 and report.counts["확인필요"] == 0
     assert _snapshot(excel_job.input_dir) == before
@@ -138,11 +138,11 @@ def test_excel_job_both_matches_expected_forms_and_ledger(env):
 
 def test_second_run_of_both_jobs_has_no_news(env):
     work, out, pdf_job, excel_job = env
-    run_job(pdf_job, work)
-    run_job(excel_job, work)
+    run_job(pdf_job, work, gate=None)
+    run_job(excel_job, work, gate=None)
     ledgers = _snapshot(out)
 
-    again = [run_job(pdf_job, work), run_job(excel_job, work)]
+    again = [run_job(pdf_job, work, gate=None), run_job(excel_job, work, gate=None)]
 
     assert [r.has_news for r in again] == [False, False]  # 서신은 하루가 안 돼 「맞지 않는 파일」로 세지 않음
     assert _snapshot(out) == ledgers
@@ -150,7 +150,7 @@ def test_second_run_of_both_jobs_has_no_news(env):
 
 def test_excel_job_po_items_match_expected(env):
     work, out, _, excel_job = env
-    run_job(excel_job, work)
+    run_job(excel_job, work, gate=None)
     key = lambda r: (r["문서종류"], r["문서번호"], str(r["줄"]))  # noqa: E731
     got = sorted(_records(out / "누적장부_PO 입력.xlsx", "품목"), key=key)
     expected = sorted((r for r in _records(EXPECTED, "품목") if r["문서종류"] == "PO"), key=key)
@@ -166,7 +166,7 @@ def test_customer_not_in_master_goes_to_review(env):
     wb.active.delete_rows(2)  # ACME 줄을 지움
     wb.save(work / "고객마스터.xlsx")
 
-    report = run_job(excel_job, work)
+    report = run_job(excel_job, work, gate=None)
 
     assert report.counts["성공"] == 1 and report.counts["확인필요"] == 1
     note = (excel_job.folder / "확인필요" / "고객오더_ACME_PO-ACME-2026-0417.xlsx.txt").read_text(encoding="utf-8")
@@ -183,7 +183,7 @@ def test_excel_lock_file_in_input_is_ignored(env):
     t = time.time() - 2 * 24 * 3600
     os.utime(lock, (t, t))
 
-    report = run_job(excel_job, work)
+    report = run_job(excel_job, work, gate=None)
 
     assert not report.has_news and report.unmatched_old == 0
     assert lock.exists() and load_records(excel_job) == []

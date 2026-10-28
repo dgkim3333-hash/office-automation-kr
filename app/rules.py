@@ -191,6 +191,9 @@ def _excel_form(name, body, doc_types) -> ExcelForm:
         raise RuleError(f"{where} 머리에 번호필드 '{doc_type.number_field}' 가 있어야 합니다.")
     items = _excel_items(where, body.get("품목"))
     _check_columns(f"{where} 문서종류 {doc_type.name}", doc_type.check, items and items.columns, "품목")
+    if items is not None:
+        _check_line_columns(f"{where} 문서종류 {doc_type.name}", doc_type.check, items.columns,
+                            items.quantity_columns, items.amount_columns)
     return ExcelForm(name, doc_type.name, [str(k) for k in keywords], head, items)
 
 
@@ -319,6 +322,8 @@ def _doc_type(name, body) -> DocType:
         raise RuleError(f"{where} 검산에 적은 것이 없습니다. 소계 · 부대비용 · 합계 중 하나 이상을 적거나 검산 줄을 지우세요.")
     check = _check_spec(where, body.get("검산"), fields)
     _check_columns(where, check, table and table.columns, "표의")
+    if table is not None:
+        _check_line_columns(where, check, table.columns, table.quantity_columns, table.amount_columns)
 
     return DocType(
         name=name,
@@ -339,7 +344,7 @@ def _check_columns(where, check, columns, what):
     """검산에 쓰는 품목 열이 열 목록에 있어야 한다.
 
     금액열은 소계 · 합계 검산이 있으면(기본 이름이어도) 꼭 있어야 한다. 수량열 · 단가열은 규칙에 직접 적었을 때만
-    검사한다. 기본 이름이 표에 없으면 줄 검산이 해당 없음이 될 뿐이다(단가 없는 표도 합계 검산은 할 수 있게).
+    여기서 검사한다. 기본 이름이 표에 없을 때는 _check_line_columns 가 본다(단가 없는 표도 합계 검산은 할 수 있게).
     """
     if check is None or columns is None:
         return
@@ -351,6 +356,25 @@ def _check_columns(where, check, columns, what):
                 f"{where} 검산의 {key} '{name}' 가 {what} 열 목록에 없습니다. "
                 f"검산 아래에 {key}: 열이름 처럼 실제 열 이름을 적으세요."
             )
+
+
+LINE_COLUMNS_HINT = "검산: 에 수량열 · 단가열 · 금액열 을 적으세요(표의 열 이름이 수량 · 단가 · 금액 이 아닙니다)"
+
+
+def _check_line_columns(where, check, columns, quantity_columns, amount_columns):
+    """수량열 · 금액열을 적은 표(줄 검산을 할 표)는 줄 검산 열이 실제 열이어야 한다.
+
+    열 이름이 수량 · 단가 · 금액 이 아니면 줄 검산이 조용히 「해당 없음」이 되므로, 검산: 에 수량열 · 단가열 ·
+    금액열 을 적게 한다. 금액열이 하나뿐인 표는 단가가 없는 문서로 보고 단가열은 묻지 않는다(합계 검산만 함).
+    """
+    if not quantity_columns or not amount_columns:
+        return
+    spec = check or CheckSpec(None, [], None)
+    needed = [("수량열", "quantity"), ("금액열", "amount")]
+    if len(amount_columns) >= 2:  # 금액 열이 둘 이상(단가 · 금액)이면 단가 열도 있는 표
+        needed.append(("단가열", "price"))
+    if any(getattr(spec, attr) not in columns for _, attr in needed):
+        raise RuleError(f"{where} {LINE_COLUMNS_HINT}")
 
 
 def _check_spec(where, spec, fields) -> CheckSpec | None:

@@ -392,7 +392,8 @@ def test_excel_formula_float_passes_line_check(tmp_path, example_rules):
     wb.save(path)
     _raw_float(path, "0.375", "0.30000000000000004")
     checks = verify(read_excel(path, example_rules), path)
-    assert failed(checks) == []
+    # 합계 칸은 고치지 않았으므로 「품목 합 = 합계」만 다르다(예시 PO 합계 검산). 줄 검산은 통과
+    assert [c.item for c in failed(checks)] == ["품목 합 = 합계"]
     line = next(c for c in checks if c.item == "1줄 금액")
     assert line.ok is True and line.output == "0.3"
 
@@ -417,4 +418,4 @@ def test_excel_int_amount_rounds_to_two_places(tmp_path, example_rules):
     ws["D14"], ws["F14"], ws["G14"] = 2, 50.2, 100
     path = tmp_path / "po.xlsx"
     wb.save(path)
-    assert _items(verify(read_excel(path, example_rules), path)) == ["1줄 금액"]
+    assert _items(verify(read_excel(path, example_rules), path)) == ["1줄 금액", "품목 합 = 합계"]

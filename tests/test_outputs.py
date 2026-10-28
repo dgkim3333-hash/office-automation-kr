@@ -116,7 +116,7 @@ def test_check_file_has_one_row_per_check(rules, tmp_path):
     path = write_check_file(tmp_path, result, checks, pdf.name)
     assert path.name == "검산_INV-2026-10231.xlsx"
     wb = openpyxl.load_workbook(path)
-    assert wb.sheetnames == ["검산"]
+    assert wb.sheetnames == ["검산", "추출값", "품목"]  # 회사 양식 값을 주지 않으면 회사양식 시트는 없음
     rows = list(wb["검산"].iter_rows(values_only=True))
     assert rows[0][:2] == ("원본파일", pdf.name)
     assert rows[1] == ("항목", "원본 값", "결과 값", "일치")

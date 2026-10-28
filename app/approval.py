@@ -12,7 +12,7 @@ from pathlib import Path
 
 from app.forms import form_fingerprint, form_key, rules_form_fingerprint  # noqa: F401  (바깥에서 app.approval 로 부른다)
 from app.job_run import (
-    REVIEW, WAITING, WAITING_CHECKS, RunReport, _current_state, _documents, check_file_info, file_fingerprint,
+    COMPANY_MODES, REVIEW, WAITING, WAITING_CHECKS, RunReport, _current_state, _documents, check_file_info, file_fingerprint,
     job_lock, load_records, run_job,
 )
 from app.jobs import Job, save_job
@@ -23,14 +23,15 @@ FINISHED = ("성공", "중복")  # 이 상태가 된 복사본은 더 승인할 
 
 
 def _current_count(job: Job, key: str, rules=None) -> int:
-    """그 양식의 승인 수. 규칙이 저장된 지문과 다르면 그 양식만 0 으로 되돌리고 새 지문을 저장한다.
+    """그 양식의 승인 수. 규칙(또는 회사 양식을 내는지)이 저장된 지문과 다르면 그 양식만 0 으로 되돌리고 새 지문을 저장한다.
 
     rules(이번 실행이 읽은 규칙)가 있으면 그 글자에서 지문을 계산한다(실행 중 규칙.yaml 이 바뀌어도 추출과 같은 규칙).
     """
+    company = job.output_mode in COMPANY_MODES  # 출력 방식이 회사 양식을 새로 내면 지문이 바뀐다(Ruling 29)
     if rules is not None and getattr(rules, "raw", None) is not None:
-        fingerprint = rules_form_fingerprint(rules, key)
+        fingerprint = rules_form_fingerprint(rules, key, company)
     else:
-        fingerprint = form_fingerprint(job.rules_path, key)
+        fingerprint = form_fingerprint(job.rules_path, key, company)
     if job.fingerprints.get(key) != fingerprint:
         job.approvals[key] = 0
         job.fingerprints[key] = fingerprint

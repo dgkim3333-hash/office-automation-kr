@@ -157,7 +157,9 @@ def test_catch_up_runs_missed_jobs_in_order_once(dirs):
     assert calls == [1, 2]
 
 
-def test_catch_up_skips_locked_and_deleted_jobs(dirs):
+def test_catch_up_skips_locked_and_deleted_jobs(dirs, monkeypatch):
+    """잠긴 작업은 기다렸다가 다시 해 보고(여기서는 한 번), 끝내 잠겨 있으면 locked 로 돌려준다. 지워진 작업은 건너뛴다."""
+    monkeypatch.setattr(schedule, "LOCK_RETRY_LIMIT_SECONDS", schedule.LOCK_RETRY_SECONDS)
     work, inp, out = dirs
     _job(work, inp, out, "가", "16:00")
     _job(work, inp, out, "나", "16:00")
@@ -172,8 +174,10 @@ def test_catch_up_skips_locked_and_deleted_jobs(dirs):
         if job.number == 2:
             raise JobError("작업이 지워졌습니다")
 
-    assert [name[:2] for name in schedule.catch_up(work, now=now, runner=runner)] == ["03"]
-    assert calls == [1, 2, 3]
+    locked = []
+    assert [name[:2] for name in schedule.catch_up(work, now=now, runner=runner, locked=locked)] == ["03"]
+    assert calls == [1, 1, 2, 3]
+    assert [job.number for job in locked] == [1]
 
 
 def test_catch_up_rechecks_job_on_disk_before_running(dirs):

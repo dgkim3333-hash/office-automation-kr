@@ -8,6 +8,7 @@
   3. 둘 다 막히면 「없음」: 바탕화면 「지금 실행」만 쓴다.
 어느 방법이 쓰였는지는 작업설정.yaml 의 스케줄러에 남긴다.
 """
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +22,14 @@ STARTUP = "시작프로그램"
 NONE = "없음"
 CATCH_UP_LINK = "사무자동화 놓친 작업 실행.lnk"
 TIME_LIMIT_HOURS = 2  # 한 번 실행이 이보다 길면 작업 스케줄러가 멈춘다(멈춰 있는 실행이 다음 날을 막지 않게)
+# 자동 실행 · 놓친 실행이 잠긴 작업(승인 · job set · pause 등이 쥠)을 만나면 이 간격으로 이 시간까지 다시 해 본다
+LOCK_RETRY_SECONDS = 30
+LOCK_RETRY_LIMIT_SECONDS = 15 * 60
+
+
+def _sleep(seconds: float) -> None:
+    """기다리기(테스트가 바꿔 끼운다)."""
+    time.sleep(seconds)
 
 
 class ScheduleError(Exception):
@@ -167,25 +176,53 @@ def _default_runner(work):
     return lambda job: run_job(job, work, gate=approval_gate)
 
 
-def catch_up(work, now=None, runner=None) -> list[str]:
+def retry_locked(call):
+    """call() 이 JobLocked 면 LOCK_RETRY_SECONDS 마다 다시, LOCK_RETRY_LIMIT_SECONDS 까지 해 본다.
+    그래도 잠겨 있으면 마지막 JobLocked 를 그대로 던진다(부른 쪽이 기록하고 알린다)."""
+    from app.job_run import JobLocked
+
+    waited = 0
+    while True:
+        try:
+            return call()
+        except JobLocked:
+            if waited >= LOCK_RETRY_LIMIT_SECONDS:
+                raise
+        _sleep(LOCK_RETRY_SECONDS)
+        waited += LOCK_RETRY_SECONDS
+
+
+def catch_up(work, now=None, runner=None, locked: list | None = None) -> list[str]:
     """놓친 작업을 번호 순으로 하나씩 실행하고 실행한 작업 이름들을 돌려준다.
-    실행 직전에 작업설정.yaml 을 다시 읽어 그새 다른 실행(작업 스케줄러)이 끝냈으면 건너뛴다.
-    잠긴(실행 중인) 작업 · 그새 지워진 작업은 건너뛴다."""
+    실행 직전에 작업설정.yaml 을 다시 읽어 그새 다른 실행(작업 스케줄러)이 끝냈으면 건너뛴다. 그새 지워진 작업도 건너뛴다.
+    잠긴 작업(승인 · job set 등)은 retry_locked 처럼 기다렸다가 다시 해 보고(다시 읽어 아직 할 일일 때만),
+    끝내 잠겨 있으면 그 작업을 locked 에 더한다(부른 쪽이 기록하고 알린다. 조용히 건너뛰지 않게)."""
     from app.job_run import JobLocked
 
     now = now or datetime.now()
     runner = runner or _default_runner(work)
     ran = []
     for job in due_jobs(list_jobs(work), now):
-        try:
-            fresh = load_job(job.folder)
-        except JobError:
-            continue
-        if not due_jobs([fresh], now):
-            continue
-        try:
-            runner(fresh)
-        except (JobLocked, JobError):
-            continue
-        ran.append(fresh.name)
+        waited = 0
+        while True:
+            try:
+                fresh = load_job(job.folder)
+            except JobError:
+                break
+            if not due_jobs([fresh], now):
+                break  # 그새 다른 실행이 끝냈거나 멈춤으로 바뀜
+            try:
+                runner(fresh)
+            except JobLocked:
+                if waited >= LOCK_RETRY_LIMIT_SECONDS:
+                    if locked is not None:
+                        locked.append(fresh)
+                    break
+                _sleep(LOCK_RETRY_SECONDS)
+                waited += LOCK_RETRY_SECONDS
+                continue
+            except JobError:
+                break
+            ran.append(fresh.name)
+            break
     return ran

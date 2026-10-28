@@ -9,7 +9,7 @@ from openpyxl.packaging.custom import StringProperty
 from openpyxl.styles import Font
 
 from app.excel_extract import excel_number
-from app.ledger import AMOUNT_FORMAT, DATE_FORMAT, DATETIME_FORMAT, fit_columns
+from app.ledger import DATE_FORMAT, DATETIME_FORMAT, amount_format, fit_columns
 from app.markup import markup_value
 from app.organize import free_name, render_text
 
@@ -65,16 +65,9 @@ def _write_sheet(ws, header, rows):
             elif isinstance(cell.value, date):
                 cell.number_format = DATE_FORMAT
             elif isinstance(cell.value, Decimal):
-                cell.number_format = _amount_format(cell.value)
+                cell.number_format = amount_format(cell.value)  # 누적장부와 같은 규칙
     ws.freeze_panes = "A2"
     fit_columns(ws)
-
-
-def _amount_format(value: Decimal) -> str:
-    """금액 서식. 소수 자리가 2 보다 많으면 그 자리까지 보이게(본사 단가 0.103 이 0.10 으로 보이지 않게)."""
-    exponent = value.normalize().as_tuple().exponent if value.is_finite() else 0
-    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
-    return AMOUNT_FORMAT if places <= 2 else "#,##0." + "0" * places
 
 
 def _save(wb, folder, name) -> Path:
@@ -129,9 +122,18 @@ def _mark(ok) -> str:
     return "해당 없음" if ok is None else "일치" if ok else "불일치"
 
 
-def write_check_file(folder, result, checks, source_name, stamps: dict | None = None) -> Path:
-    """검산 기록: 검산_{번호}.xlsx. 맨 위 줄에 원본파일, 그 아래 항목별 대조 결과. 회사 양식 파일에는 쓰지 않는다.
+FIELDS_SHEET = "추출값"
+ITEMS_SHEET_NAME = "품목"
+COMPANY_SHEET = "회사양식"
 
+
+def write_check_file(folder, result, checks, source_name, stamps: dict | None = None, company=None) -> Path:
+    """검산 기록 · 승인대기 대조표: 검산_{번호}.xlsx. 친구가 승인 전에 무엇이 나갈지 보는 파일이다(Claude 는 열지 않음).
+
+    검산 시트(맨 앞): 맨 위 줄에 원본파일, 그 아래 항목별 대조 결과(승인이 맨 위 줄로 대조표와 복사본을 짝짓는다).
+    추출값 시트: 뽑은 필드 값 전부(품명 · 납품처 · 인도조건 같은 글자 값 포함). 품목 시트: 품목 표 그대로.
+    회사양식 시트(company = (머리글, 행)을 줄 때): 회사 양식에 들어갈 값 그대로(고객마스터의 고객코드 ·
+    결제조건, 마크업 값 포함). 회사 양식 파일 자체에는 쓰지 않는다.
     stamps 는 화면에 보이지 않는 문서 속성(사용자 지정 속성)으로 남긴다(승인대기 대조표의 지문 등).
     """
     wb = openpyxl.Workbook()
@@ -147,6 +149,16 @@ def write_check_file(folder, result, checks, source_name, stamps: dict | None = 
         ws.append([ILLEGAL_CHARACTERS_RE.sub("", v) for v in (c.item, c.source, c.output)] + [_mark(c.ok)])
     ws.freeze_panes = "A3"
     fit_columns(ws)
+
+    _write_sheet(wb.create_sheet(FIELDS_SHEET), ["필드", "값"],
+                 [[name, value if value is not None else "(못 찾음)"] for name, value in result.fields.items()])
+    table = result.table or []
+    if table:
+        columns = list(dict.fromkeys(name for row in table for name in row))
+        _write_sheet(wb.create_sheet(ITEMS_SHEET_NAME), columns, [[row.get(c) for c in columns] for row in table])
+    if company is not None:
+        header, rows = company
+        _write_sheet(wb.create_sheet(COMPANY_SHEET), header, rows)
     return _save(wb, folder, render_text(f"검산_{{{result.doc_type.number_field}}}.xlsx", result.fields))
 
 
@@ -222,7 +234,8 @@ def _same_value(want, got) -> bool:
             if number == back:
                 return True
             # 15자리를 넘는 소수는 엑셀이 15자리로 저장하므로 그때만 float 로 비교. 정수는 정확히 같아야 한다
-            return number != number.to_integral_value() and len(number.as_tuple().digits) > 15                 and float(number) == float(back)
+            return (number != number.to_integral_value() and len(number.as_tuple().digits) > 15
+                    and float(number) == float(back))
         except (InvalidOperation, ValueError, OverflowError):
             return False
     return want == got

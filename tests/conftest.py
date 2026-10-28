@@ -1,5 +1,6 @@
 """모든 테스트 공통: 실제 PowerShell(작업 스케줄러 · 바탕화면 바로가기 · Windows 알림)과 실제 메시지 창을 막는다.
 
+잠긴 작업을 기다리는 자동 실행의 기다리기(app.schedule._sleep)도 바로 돌아오게 한다.
 app.powershell.default_run 을 「늘 실패하는 가짜」로 바꾸므로, 어느 테스트가 실수로 job new 등을 불러도
 실제 작업 스케줄러에 등록되거나 실제 바탕화면에 바로가기가 생기지 않는다. PowerShell 명령을 흉내 내야 하는
 테스트는 fake_ps 픽스처를 쓴다.
@@ -10,6 +11,7 @@ import pytest
 
 import app.notify
 import app.powershell
+import app.schedule
 
 
 class FakePowerShell:
@@ -41,6 +43,8 @@ def _refuse(args, **kwargs):
 def no_real_windows_side_effects(monkeypatch):
     monkeypatch.setattr(app.powershell, "default_run", _refuse)
     monkeypatch.setattr(app.notify, "_message_box", lambda title, body: None)
+    # 잠긴 작업을 기다리는 자동 실행(30초마다 15분)이 테스트를 실제로 멈춰 세우지 않게
+    monkeypatch.setattr(app.schedule, "_sleep", lambda seconds: None)
 
 
 @pytest.fixture

@@ -20,7 +20,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from app.excel_extract import read_excel
 from app.extract import extract
 from app.forms import form_key, rules_form_fingerprint
-from app.jobs import Job, JobError, _folder_title, list_jobs, load_job, save_job
+from app.jobs import OUTPUT_MODES, Job, JobError, _folder_title, list_jobs, load_job, save_job
 from app.ledger import ITEMS_SHEET, Ledger, LedgerLocked, is_locked
 from app.local_guard import LocalOnlyError, check_work_dir
 from app.log import append_log
@@ -69,7 +69,7 @@ REMAKE_HINT = "그러면 내일 실행 때(또는 규칙.yaml 을 고친 뒤) �
 STAMP_FORM = "form_fingerprint"  # 승인대기 대조표 속성: 만들 때의 양식 지문
 STAMP_FILE = "file_fingerprint"  # 승인대기 대조표 속성: 만들 때의 복사본 지문
 STAMP_MARKUP = "markup_fingerprint"  # 승인대기 대조표 속성: 그 문서가 쓰는 마크업표 줄들의 지문(마크업을 쓸 때만)
-REMADE_RULES = "규칙이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
+REMADE_RULES = "규칙 또는 출력 방식이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 REMADE_MISSING = "대조표가 없어 새로 만들었습니다. 보고 승인하세요"
 NOT_DETECTED_WAITING = "승인대기의 이 파일을 지금 규칙으로 알아보지 못했습니다. 규칙을 고치거나 복사본을 지워 거절하세요"
 REMADE_FILE = "승인대기의 파일이 대조표를 만든 뒤 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
@@ -205,17 +205,26 @@ def _current_state(records) -> dict[str, dict]:
 
 # --- 바깥에서 부르는 것 ---
 
-def run_job(job: Job, work: Path, *, now=None, source_dir: Path | None = None, gate=None,
+_APPROVAL = object()  # run_job 의 gate 기본값 표시: 처음 10건 승인(app.approval.approval_gate)
+
+
+def run_job(job: Job, work: Path, *, now=None, source_dir: Path | None = None, gate=_APPROVAL,
             on_success=None, after=None) -> RunReport:
     """작업 하나를 실행한다. source_dir 기본 = 입력 폴더(승인 실행은 작업 폴더의 승인대기\\ 를 넘긴다).
 
-    gate(job, rules, result) 가 True 면 결과를 내지 않고 승인대기로 보낸다.
+    gate(job, rules, result) 가 True 면 결과를 내지 않고 승인대기로 보낸다. 주지 않으면 승인 게이트
+    (approval_gate: 그 양식 승인 10건 미만이면 승인대기)가 기본이다. gate=None 은 승인 없이 바로 결과를 낸다는
+    뜻이므로 일부러 줄 때만 쓴다(시험용).
     on_success(job, result) 는 출력까지 끝난 건마다 부른다.
     after(job, report) 는 실행이 끝난 뒤 잠금을 쥔 채 부른다(승인대기 정리처럼 다른 실행과 겹치면 안 되는 일).
 
     잠금을 잡은 뒤 작업설정.yaml 을 다시 읽어 job 을 그 값으로 바꾼 뒤 실행한다. 잠금 전에 읽어 둔 옛 값
     (승인 수 · 지문)으로 승인 없이 결과를 내거나 다른 실행이 저장한 값을 덮어쓰지 않게 한다.
     """
+    if gate is _APPROVAL:
+        from app.approval import approval_gate  # app.approval 이 이 모듈을 읽으므로 여기서 부른다
+
+        gate = approval_gate
     now = (now or datetime.now()).replace(microsecond=0)
     with job_lock(job):
         try:
@@ -670,16 +679,18 @@ class _Run:
                     f"{c.item} (계산 {c.source}, 결과 {c.output})" for c in bad))
                 return
             checks = checks + more  # 대조표 · 검산 파일에 줄마다 마크업% 와 본사 단가가 보이게
+        # 대조표 · 검산 파일에 회사 양식에 들어갈 값(고객마스터 · 마크업 값 포함)을 그대로 보이게
+        company = company_rows(result, master_row, form, markup) if self.job.output_mode in COMPANY_MODES else None
         if self.approving:
             reason = self._unseen(path, fp, result)
             if reason:  # 친구가 대조표에서 본 값이 아니므로 내보내지 않는다
-                self._remake_check(path, fp, result, checks, reason)
+                self._remake_check(path, fp, result, checks, reason, company)
                 return
         if self.rejected is not None or (self.gate is not None and self.gate(self.job, self.rules, result)):
             # 승인하지 않은 문서를 다시 처리하면 승인 수와 상관없이 늘 승인대기로(자동 실행이 내보내지 않음)
-            self._to_waiting(path, fp, result, checks)
+            self._to_waiting(path, fp, result, checks, company)
             return
-        self._write(path, fp, result, key, checks, master_row, markup)
+        self._write(path, fp, result, key, checks, master_row, markup, company)
 
     # 승인대기 대조표
 
@@ -691,7 +702,8 @@ class _Run:
     def _form_fp(self, result) -> str:
         key = form_key(result)
         if key not in self.form_fps:
-            self.form_fps[key] = rules_form_fingerprint(self.rules, key)
+            # 회사 양식을 내는지도 지문에 넣는다: 방식을 바꾸면 승인 수 · 승인대기 대조표가 새로(Ruling 29)
+            self.form_fps[key] = rules_form_fingerprint(self.rules, key, self.job.output_mode in COMPANY_MODES)
         return self.form_fps[key]
 
     def _markup_fp(self, result) -> str:
@@ -733,7 +745,7 @@ class _Run:
             return REMADE_RULES
         return REMADE_FILE
 
-    def _write_waiting_check(self, copy: Path, fp, result, checks):
+    def _write_waiting_check(self, copy: Path, fp, result, checks, company=None):
         """승인대기 대조표를 (다시) 만든다. 같은 복사본 이름을 가리키던 옛 대조표는 지운다."""
         name = copy.name.casefold()
         for old, _ in self._checks().get(name, []):
@@ -743,12 +755,12 @@ class _Run:
                 self.warnings.append(f"경고: 옛 대조표를 지우지 못함 ({old.name}): {e}")
         stamps = self._stamps(fp, result)
         # 대조표의 원본파일 칸 = 복사본 이름. 승인이 이 이름으로 대조표와 복사본을 짝짓는다
-        check = write_check_file(copy.parent / WAITING_CHECKS, result, checks, copy.name, stamps)
+        check = write_check_file(copy.parent / WAITING_CHECKS, result, checks, copy.name, stamps, company)
         self._checks()[name] = [(check, stamps)]
 
-    def _remake_check(self, path, fp, result, checks, reason):
+    def _remake_check(self, path, fp, result, checks, reason, company=None):
         try:
-            self._write_waiting_check(path, fp, result, checks)
+            self._write_waiting_check(path, fp, result, checks, company)
         except Exception as e:
             self._review(path, fp, result, f"대조표를 새로 만들지 못함: {e}")
             return
@@ -764,13 +776,13 @@ class _Run:
             self.master = master_from_bytes(self.master_bytes)
         return self.master
 
-    def _to_waiting(self, path, fp, result, checks):
+    def _to_waiting(self, path, fp, result, checks, company=None):
         waiting = Path(self.job.folder) / WAITING
         waiting.mkdir(parents=True, exist_ok=True)
         copy = free_name(waiting / path.name)
         try:
             shutil.copy2(path, copy)
-            self._write_waiting_check(copy, fp, result, checks)
+            self._write_waiting_check(copy, fp, result, checks, company)
         except Exception as e:
             if copy.exists():
                 copy.unlink()
@@ -795,13 +807,15 @@ class _Run:
             self._record(path, fp, result, "보류")
         self._done(path, "보류", LEDGER_LOCKED_REASON)
 
-    def _write(self, path, fp, result, key, checks, master_row, markup=None):
+    def _write(self, path, fp, result, key, checks, master_row, markup=None, company_preview=None):
         """출력: 누적장부 · 회사 양식. 저장한 뒤 다시 읽어 다르면 이번 건만 되돌리고 확인필요.
 
         여기까지 왔으면 처리기록에는 이 (문서종류, 번호)의 성공이 없다. 그런데 결과가 이미 있으면
         지난 실행이 결과를 쓴 뒤 기록 전에 끊긴 것일 수 있으므로, 다시 쓰지 않고 확인필요로 보낸다.
         """
         mode = self.job.output_mode
+        if mode not in OUTPUT_MODES:  # 결과 없이 성공으로 기록하지 않게(load_job 이 먼저 막지만 한 번 더)
+            raise ValueError(f"출력 방식 '{mode}' 을 쓸 수 없습니다. 고를 수 있는 것: {', '.join(OUTPUT_MODES)}")
         form = self.rules.company_form
         final = None
         if mode in COMPANY_MODES:
@@ -859,7 +873,8 @@ class _Run:
             return
 
         try:
-            write_check_file(Path(self.job.folder) / CHECKS, result, checks, self._origin(path, fp)[0])
+            write_check_file(Path(self.job.folder) / CHECKS, result, checks, self._origin(path, fp)[0],
+                             company=company_preview)
         except Exception as e:  # 결과는 이미 나갔으므로 알리기만 한다
             self.warnings.append(f"경고: 검산 파일을 만들지 못함 ({path.name}): {e}")
         if company is not None:

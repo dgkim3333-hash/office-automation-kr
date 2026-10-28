@@ -29,24 +29,27 @@ def _detection(section) -> list:
     return [[str(name), body.get("판별키워드") if isinstance(body, dict) else None] for name, body in section.items()]
 
 
-def form_fingerprint(rules_path: Path, key: str) -> str:
+def form_fingerprint(rules_path: Path, key: str, company: bool = True) -> str:
     """규칙.yaml 중 그 양식에 해당하는 부분 + 회사양식 + 판별 순서 · 판별키워드의 sha256 앞 16자.
 
     엑셀양식이면 그 엑셀양식과 연결된 문서종류 + 모든 엑셀양식의 판별 부분,
     아니면 그 문서종류 + 모든 문서종류의 판별 부분. 다른 양식의 추출 규칙을 고쳐도 값이 바뀌지 않는다.
+    company = 작업이 회사 양식을 내는가(출력 방식 회사양식 · 둘다). 회사 양식 규칙은 낼 때만 지문에 넣는다.
+    그래서 출력 방식을 바꿔 회사 양식을 새로 내거나 그만 내면 그 작업의 모든 양식이 승인 0 에서 다시 센다
+    (누적장부만 보고 승인한 양식이 본사 시트를 대조표 없이 내보내지 않게, Ruling 29).
     """
-    return form_fingerprint_data(yaml.safe_load(Path(rules_path).read_text(encoding="utf-8")), key)
+    return form_fingerprint_data(yaml.safe_load(Path(rules_path).read_text(encoding="utf-8")), key, company)
 
 
-def rules_form_fingerprint(rules, key: str) -> str:
+def rules_form_fingerprint(rules, key: str, company: bool = True) -> str:
     """이미 읽은 규칙(Rules.raw)에서 계산한 양식 지문. 실행 중 규칙.yaml 이 바뀌어도 추출에 쓴 규칙과 같다."""
-    return form_fingerprint_data(rules.raw, key)
+    return form_fingerprint_data(rules.raw, key, company)
 
 
-def form_fingerprint_data(data, key: str) -> str:
+def form_fingerprint_data(data, key: str, company: bool = True) -> str:
     """form_fingerprint 와 같되 규칙.yaml 을 yaml 로 읽은 값에서 계산한다."""
     data = data if isinstance(data, dict) else {}
-    part = {"회사양식": data.get("회사양식")}
+    part = {"회사양식": data.get("회사양식") if company else None}
     excel = _named(data.get("엑셀양식"), key)
     if excel is not None:
         part["엑셀양식"] = excel

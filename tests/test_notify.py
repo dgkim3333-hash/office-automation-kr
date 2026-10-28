@@ -144,7 +144,7 @@ def test_unmatched_xls_counted_separately_and_hinted(job):
     files = unmatched_files(job, job.folder.parent.parent, datetime.now())
     assert sorted(p.name for p in files) == ["모르는.pdf", "옛양식.xls"]
 
-    report = run_job(job, job.folder.parent.parent)
+    report = run_job(job, job.folder.parent.parent, gate=None)
     assert report.unmatched_old == 2 and report.unmatched_xls == 1
     assert "옛 엑셀(.xls) 1개" in report.message and ".xlsx 로 다시 저장" in report.message
 

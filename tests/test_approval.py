@@ -302,7 +302,7 @@ def test_rule_change_while_waiting_remakes_check_file_before_output(env):
     report = approve(job, work)
 
     assert report.counts["승인대기"] == 1 and report.counts["성공"] == 0
-    assert "규칙이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요" in report.message
+    assert "규칙 또는 출력 방식이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요" in report.message
     assert _files(out) == [] and job.approvals["ACME"] == 5
     waiting = job.folder / "승인대기"
     assert _files(waiting) == [ACME_PO.name]

@@ -17,6 +17,7 @@
 """
 import argparse
 import os
+import re
 import shutil
 import sys
 import traceback
@@ -46,6 +47,7 @@ from app.verify import failed, verify
 RUN_RECORD = "실행기록.txt"  # 작업 폴더. 실행 · 승인마다 결과 요약을 덧붙인다(아무도 안 볼 때의 기록)
 DELETED_DIR = "지운작업"     # 작업\지운작업\: job delete 가 작업 폴더를 옮겨 두는 곳(규칙 · 처리기록 보존)
 CANCELLED = "취소함"
+LINE_CHECK = re.compile(r"^\d+줄 금액$")  # verify 의 줄 검산 항목 이름
 XLS_REASON = ("옛 엑셀 형식(.xls)은 읽지 못합니다. 엑셀에서 열어 「다른 이름으로 저장」 → .xlsx 로 저장한 뒤 "
               "입력 폴더에 다시 넣으세요")
 DESKTOP_HINT = "작업을 실행하려면 바탕화면의 「지금 실행 - 작업 이름」을 쓰세요. 승인은 「승인 - 작업 이름」입니다."
@@ -418,7 +420,7 @@ def _automatic(args, repo_root) -> int:
         log_dir = work
         if args.command == "catch-up":
             return _catch_up(work, what)
-        return _auto_run(work, args.job)
+        return _auto_run(work, args.job, what)
     except config.ConfigError as e:
         return _auto_failed(log_dir, what, f"{e}. 작업 폴더 설정(작업폴더.txt)을 찾지 못했습니다.")
     except LocalOnlyError as e:
@@ -439,17 +441,32 @@ def _auto_failed(log_dir, what: str, message: str, detail: str = "") -> int:
     return 1
 
 
-def _auto_run(work, key) -> int:
+def _locked_text(job) -> str:
+    return (f"{job.title} 작업이 다른 일로 잠겨 있어 오늘 자동 실행을 못 했습니다. 지금 실행을 눌러 주세요"
+            f"(바탕화면 「지금 실행 - {job.title}」).")
+
+
+def _auto_run(work, key, what: str) -> int:
     job = find_job(work, key)
     if job.paused:
         print(f"{job.name}: 일시중지 중이라 실행하지 않았습니다.")
         return 0
+
+    def attempt():
+        # 기다리는 동안 job pause 가 잠금을 쥐고 멈춤으로 바꿨을 수 있다. 잠금을 쥔 실행이 아니므로 여기서 다시 본다
+        if reload_job(job).paused:
+            return None
+        return run_job(job, work, gate=approval_gate)
+
     try:
-        report = run_job(job, work, gate=approval_gate)
-    except JobLocked as e:  # 지금 실행 등이 돌고 있음: 그 실행이 오늘 몫을 처리한다
+        # 승인 · job set · pause 등이 잠금을 쥐고 있으면 30초마다 15분까지 다시 해 본다(승인은 오늘 실행을 대신하지 않음)
+        report = schedule.retry_locked(attempt)
+    except JobLocked as e:
         print(e)
-        _append_run_record(job, "자동 실행", f"건너뜀: {e}")
-        return 1
+        return _auto_failed(job.folder, what, _locked_text(job))
+    if report is None:
+        print(f"{job.name}: 일시중지 중이라 실행하지 않았습니다.")
+        return 0
     return _finish(job, report, "자동 실행")
 
 
@@ -462,7 +479,7 @@ def _catch_up(work, what: str) -> int:
         try:
             report = run_job(job, work, gate=approval_gate)
         except (JobLocked, JobError):
-            raise  # 실행 중 · 그새 지워진 작업: schedule.catch_up 이 건너뛴다
+            raise  # 잠김: schedule.catch_up 이 기다렸다가 다시 해 본다. 그새 지워진 작업: 건너뛴다
         except Exception as e:  # 한 작업의 예상 못 한 오류가 다음 작업과 앞 작업의 알림을 막지 않게
             detail = "".join(traceback.format_exception(e))
             print(f"{job.name}: 예상하지 못한 오류로 멈췄습니다: {e}")
@@ -473,7 +490,12 @@ def _catch_up(work, what: str) -> int:
         _append_run_record(job, "놓친 실행", report.message)
         finished.append((job, report))
 
-    ran = schedule.catch_up(work, runner=runner)
+    locked = []
+    ran = schedule.catch_up(work, runner=runner, locked=locked)
+    for job in locked:  # 끝내 잠겨 있던 작업: 조용히 넘어가지 않게 기록하고 아래에서 알린다
+        print(_locked_text(job))
+        _append_run_record(job, "놓친 실행 실패", _locked_text(job))
+        failed.append(f"{job.name}: {_locked_text(job)}")
     for job, report in finished:
         if report.has_news:
             notify_report(job, report)
@@ -606,6 +628,10 @@ def _print_checks(result, path) -> int:
     print("\n| 검산 | 원본 | 결과 | 일치 |\n|---|---|---|---|")
     for c in checks:
         print(f"| {_cell(c.item)} | {_cell(c.source)} | {_cell(c.output)} | {_mark(c.ok)} |")
+    lines = [c for c in checks if LINE_CHECK.match(c.item)]
+    if result.table and lines and all(c.ok is None for c in lines):
+        print(f"\n경고: 품목 {len(result.table)}줄의 줄 검산(수량 x 단가 = 금액)이 모두 해당 없음입니다. "
+              "단가가 없는 문서가 아니면 규칙.yaml 의 검산: 에 수량열 · 단가열 · 금액열 을 실제 열 이름으로 적으세요.")
     return len(failed(checks))
 
 

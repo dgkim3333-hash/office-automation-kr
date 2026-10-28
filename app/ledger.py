@@ -203,6 +203,14 @@ def fit_columns(ws):
             dim.width = need
 
 
+def amount_format(value: Decimal) -> str:
+    """금액 서식. 소수 자리가 2 보다 많으면 그 자리까지 보이게(0.3745 가 0.37 로, 본사 단가 0.103 이 0.10 으로
+    보이지 않게). 누적장부 · 회사 양식 · 추출결과가 같은 규칙을 쓴다."""
+    exponent = value.normalize().as_tuple().exponent if value.is_finite() else 0
+    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    return AMOUNT_FORMAT if places <= 2 else "#,##0." + "0" * places
+
+
 def _new_workbook():
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -248,7 +256,7 @@ def _append(ws, values):
         elif isinstance(value, date):
             cell.number_format = DATE_FORMAT
         elif isinstance(value, Decimal):
-            cell.number_format = AMOUNT_FORMAT
+            cell.number_format = amount_format(value)
 
 
 def _refresh_table(ws, name):

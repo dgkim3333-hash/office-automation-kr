@@ -97,7 +97,7 @@ def test_example_check_specs():
     rules = load_rules(EXAMPLE)
     assert rules.get("Invoice").check == CheckSpec(subtotal="소계", extras=["운임"], total="합계금액")
     assert rules.get("DM").check == CheckSpec(subtotal=None, extras=[], total="합계금액")
-    assert rules.get("PO").check is None
+    assert rules.get("PO").check == CheckSpec(subtotal=None, extras=[], total="합계금액")  # 엑셀 PO 도 합계 검산
 
 
 def test_check_spec_unknown_field_is_rule_error(tmp_path):
@@ -164,11 +164,12 @@ def test_total_only_check_without_price_column_loads(tmp_path):
     assert spec.total == "합계금액" and spec.price == "단가"
 
 
-def test_default_quantity_price_are_not_required(tmp_path):
+def test_renamed_quantity_price_must_be_named(tmp_path):
     def change(d):
         _renamed_table(d)
-        d["검산"].update(금액열="Amount")  # 수량 · 단가 기본 이름은 표에 없어도 됨(줄 검산 해당 없음)
-    assert load_rules(_broken(tmp_path, change)).get("Invoice").check.amount == "Amount"
+        d["검산"].update(금액열="Amount")  # 수량 · 단가를 안 적으면 줄 검산이 조용히 해당 없음이 되므로 막는다
+    with pytest.raises(RuleError, match="검산: 에 수량열 · 단가열 · 금액열 을 적으세요"):
+        load_rules(_broken(tmp_path, change))
 
 
 def test_named_amount_column_checked_even_without_sum(tmp_path):

@@ -135,7 +135,7 @@ def test_runs_only_detected_files_and_leaves_others(env):
     _drop(INV, inp)
     before = _snapshot(inp)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1 and report.counts["확인필요"] == 0
     assert report.has_news
@@ -156,10 +156,10 @@ def test_second_run_skips_processed_even_if_renamed(env):
     work, inp, out = env
     job = _job(work, inp, out)
     _drop(INV, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     os.rename(inp / "INV-2026-10231.pdf", inp / "다시받은_인보이스.pdf")
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert all(v == 0 for v in report.counts.values())
     assert report.unmatched_old == 0 and not report.has_news
@@ -172,7 +172,7 @@ def test_review_file_retried_next_day_or_after_rule_change(env):
     _drop(PDFS / "Scan_signed_packing_list.pdf", inp)
     now = datetime.now().replace(microsecond=0)
 
-    first = run_job(job, work, now=now)
+    first = run_job(job, work, now=now, gate=None)
     assert first.counts["확인필요"] == 1
     note = job.folder / "확인필요" / "Scan_signed_packing_list.pdf.txt"
     assert note.is_file()
@@ -180,12 +180,12 @@ def test_review_file_retried_next_day_or_after_rule_change(env):
     assert str(inp / "Scan_signed_packing_list.pdf") in text and "텍스트 없음" in text
     assert _files(job.folder / "확인필요") == ["Scan_signed_packing_list.pdf.txt"]  # 원본 복사 없음
 
-    assert run_job(job, work, now=now).counts["확인필요"] == 0  # 같은 날: 건너뜀
-    assert run_job(job, work, now=now + timedelta(days=1)).counts["확인필요"] == 1  # 다음 날: 다시 시도
+    assert run_job(job, work, now=now, gate=None).counts["확인필요"] == 0  # 같은 날: 건너뜀
+    assert run_job(job, work, now=now + timedelta(days=1), gate=None).counts["확인필요"] == 1  # 다음 날: 다시 시도
 
     with open(job.rules_path, "a", encoding="utf-8") as f:
         f.write("\n# 규칙을 고침\n")
-    assert run_job(job, work, now=now + timedelta(days=1)).counts["확인필요"] == 1  # 규칙이 바뀌면 같은 날도
+    assert run_job(job, work, now=now + timedelta(days=1), gate=None).counts["확인필요"] == 1  # 규칙이 바뀌면 같은 날도
     assert [r["상태"] for r in load_records(job)] == ["확인필요"] * 3
     assert (inp / "Scan_signed_packing_list.pdf").is_file()
 
@@ -194,13 +194,13 @@ def test_new_file_with_same_number_is_duplicate(env):
     work, inp, out = env
     job = _job(work, inp, out)
     _drop(INV, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     changed = inp / "INV-2026-10231_재발송.pdf"
     changed.write_bytes(INV.read_bytes() + b"\n% resent\n")  # 내용이 다른 파일, 같은 인보이스번호
     os.utime(changed, (time.time() - 3600,) * 2)
     out_before = _snapshot(out)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["중복"] == 1 and report.counts["성공"] == 0
     assert report.has_news and report.output_files == []
@@ -213,14 +213,14 @@ def test_duplicate_found_without_ledger_in_company_mode(env):
     work, inp, out = env
     job = _job(work, inp, out, mode="회사양식")
     _drop(ACME_PO, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     resent = inp / "재발송_PO.xlsx"
     wb = openpyxl.load_workbook(ACME_PO)
     wb.active["Z1"] = "재발송"  # 내용은 다르지만 같은 PO 번호
     wb.save(resent)
     os.utime(resent, (time.time() - 3600,) * 2)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["중복"] == 1 and report.counts["성공"] == 0
     assert _files(out) == ["회사양식_SO입력_PO-ACME-2026-0417.xlsx"]
@@ -231,7 +231,7 @@ def test_mode_ledger_only_writes_ledger_and_no_company_file(env):
     job = _job(work, inp, out, mode="누적장부")
     _drop(INV, inp)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert _files(out) == [LEDGER]
     assert report.output_files == [out / LEDGER]
@@ -246,7 +246,7 @@ def test_mode_company_only_writes_company_file_and_no_ledger(env):
     job = _job(work, inp, out, mode="회사양식")
     _drop(ACME_PO, inp)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1
     assert _files(out) == ["회사양식_SO입력_PO-ACME-2026-0417.xlsx"]
@@ -262,7 +262,7 @@ def test_mode_both_from_excel_po(env):
     _drop(ACME_PO, inp)
     before = _snapshot(inp)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1
     assert _files(out) == sorted(["회사양식_SO입력_PO-ACME-2026-0417.xlsx", LEDGER])
@@ -279,7 +279,7 @@ def test_company_form_from_pdf_po_when_mode_company(env, tmp_path):
     job = _job(work, inp, out, mode="회사양식", rules_text=PDF_PO_RULES)
     _drop(_fixtures(tmp_path) / "ACME_PO_PO-77001.pdf", inp)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1, report.message
     path = out / "회사양식_SO입력_PO-77001.xlsx"
@@ -295,7 +295,7 @@ def test_verify_failure_goes_to_review_and_nothing_written(env, monkeypatch):
     _drop(INV, inp)
     monkeypatch.setattr(job_run, "verify", lambda result, path: [Check("합계금액", "100.00", "1000.00", False)])
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["확인필요"] == 1 and report.counts["성공"] == 0
     assert _files(out) == []
@@ -313,7 +313,7 @@ def test_read_back_mismatch_rolls_back(env, monkeypatch):
     monkeypatch.setattr(job_run, "read_back", lambda *a, **k: ["2행 Qty: 쓴 값 1, 읽은 값 2"])
     seen = []
 
-    report = run_job(job, work, on_success=lambda job, result: seen.append(result))
+    report = run_job(job, work, on_success=lambda job, result: seen.append(result), gate=None)
 
     assert report.counts["확인필요"] == 1 and report.counts["성공"] == 0
     assert not (out / "회사양식_SO입력_PO-ACME-2026-0417.xlsx").exists()
@@ -330,7 +330,7 @@ def test_ledger_read_back_mismatch_rolls_back(env, monkeypatch):
     _drop(INV, inp)
     monkeypatch.setattr(job_run, "_ledger_problems", lambda *a, **k: ["Invoice 인보이스번호: 다름"])
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["확인필요"] == 1
     assert _rows(out / LEDGER, "Invoice") == [] and _rows(out / LEDGER, "품목") == []
@@ -341,7 +341,7 @@ def test_ledger_read_back_finds_written_rows(env):
     job = _job(work, inp, out, mode="누적장부")
     _drop(INV, inp)
     _drop(PDFS / "INV-2026-10278.pdf", inp)
-    assert run_job(job, work).counts["성공"] == 2  # 장부에 두 번째 문서를 더해도 다시 읽기가 맞다
+    assert run_job(job, work, gate=None).counts["성공"] == 2  # 장부에 두 번째 문서를 더해도 다시 읽기가 맞다
 
 
 def test_gate_true_copies_to_waiting_with_check_file(env):
@@ -375,12 +375,12 @@ def test_approval_run_reads_waiting_copy_and_keeps_it(env):
     run_job(job, work, gate=lambda *a: True)
     seen = []
 
-    report = run_job(job, work, source_dir=job.folder / "승인대기", on_success=lambda j, r: seen.append(r.number))
+    report = run_job(job, work, source_dir=job.folder / "승인대기", on_success=lambda j, r: seen.append(r.number), gate=None)
 
     assert report.counts["성공"] == 1 and seen == ["INV-2026-10231"]
     assert (job.folder / "승인대기" / "INV-2026-10231.pdf").is_file()  # 복사본은 승인 쪽(W5)이 지운다
     assert [r["인보이스번호"] for r in _rows(out / LEDGER, "Invoice")] == ["INV-2026-10231"]
-    assert run_job(job, work).counts == dict.fromkeys(report.counts, 0)  # 입력 폴더의 원본은 이미 처리됨
+    assert run_job(job, work, gate=None).counts == dict.fromkeys(report.counts, 0)  # 입력 폴더의 원본은 이미 처리됨
 
 
 def test_file_modified_within_a_minute_is_left_for_next_run(env):
@@ -388,12 +388,12 @@ def test_file_modified_within_a_minute_is_left_for_next_run(env):
     job = _job(work, inp, out)
     _drop(INV, inp, age=0)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 0 and report.counts["보류"] == 1
     assert not report.has_news
     assert load_records(job) == []
-    later = run_job(job, work, now=datetime.now() + timedelta(minutes=2))
+    later = run_job(job, work, now=datetime.now() + timedelta(minutes=2), gate=None)
     assert later.counts["성공"] == 1
 
 
@@ -403,7 +403,7 @@ def test_open_file_is_held(env, monkeypatch):
     held = _drop(INV, inp)
     monkeypatch.setattr(job_run, "is_locked", lambda path: Path(path) == held)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["보류"] == 1 and report.counts["성공"] == 0
     assert load_records(job) == []
@@ -416,7 +416,7 @@ def test_missing_output_folder_stops_without_moving(env):
     before = _snapshot(inp)
     out.rmdir()
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert "출력 폴더가 없습니다" in report.message
     assert all(v == 0 for v in report.counts.values())
@@ -431,7 +431,7 @@ def test_missing_input_folder_stops(env):
     job = _job(work, inp, out)
     inp.rmdir()
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert "입력 폴더가 없습니다" in report.message
     assert _files(out) == []
@@ -443,9 +443,9 @@ def test_second_run_while_locked_exits_with_message(env):
     _drop(INV, inp)
     with job_lock(job):
         with pytest.raises(JobLocked, match="이미 실행 중"):
-            run_job(job, work)
+            run_job(job, work, gate=None)
     assert load_records(job) == []
-    assert run_job(job, work).counts["성공"] == 1  # 잠금이 풀리면 다시 돈다
+    assert run_job(job, work, gate=None).counts["성공"] == 1  # 잠금이 풀리면 다시 돈다
 
 
 def test_two_jobs_sharing_input_folder_take_their_own_files(env):
@@ -456,8 +456,8 @@ def test_two_jobs_sharing_input_folder_take_their_own_files(env):
         _drop(PDFS / name, inp)
     before = _snapshot(inp)
 
-    first = run_job(invoices, work)
-    second = run_job(memos, work)
+    first = run_job(invoices, work, gate=None)
+    second = run_job(memos, work, gate=None)
 
     assert first.counts["성공"] == 2 and first.counts["확인필요"] == 0
     assert second.counts["성공"] == 2 and second.counts["확인필요"] == 0
@@ -479,8 +479,8 @@ def test_unmatched_old_file_is_counted(env):
     _drop(PDFS / "Letter_warranty_notice.pdf", inp, name="새편지.pdf", age=3600)     # 하루가 안 됨
     _drop(PDFS / "Letter_warranty_notice.pdf", inp, name="~$임시.xlsx", age=day)     # 엑셀 임시 파일
 
-    run_job(memos, work)
-    report = run_job(invoices, work)
+    run_job(memos, work, gate=None)
+    report = run_job(invoices, work, gate=None)
 
     assert report.counts["성공"] == 1
     assert report.unmatched_old == 1  # DM 은 다른 작업이 처리했으므로 세지 않는다
@@ -503,11 +503,11 @@ def test_interrupted_run_ledger_has_document_but_no_record_goes_to_review(env):
     work, inp, out = env
     job = _job(work, inp, out, mode="둘다")
     _drop(ACME_PO, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     (job.folder / RECORD_FILE).unlink()  # 처리기록을 쓰기 전에 끊긴 것처럼
     (out / "회사양식_SO입력_PO-ACME-2026-0417.xlsx").unlink()  # 회사 양식도 아직 안 만들어진 것처럼
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["중복"] == 0 and report.counts["확인필요"] == 1
     text = (job.folder / "확인필요" / "고객오더_ACME_PO-ACME-2026-0417.xlsx.txt").read_text(encoding="utf-8")
@@ -521,10 +521,10 @@ def test_existing_company_file_without_record_goes_to_review(env):
     work, inp, out = env
     job = _job(work, inp, out, mode="회사양식")
     _drop(ACME_PO, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     (job.folder / RECORD_FILE).unlink()
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["확인필요"] == 1 and report.counts["성공"] == 0
     assert _files(out) == ["회사양식_SO입력_PO-ACME-2026-0417.xlsx"]
@@ -547,7 +547,7 @@ def test_record_write_failure_stops_run(env, monkeypatch):
         real(job_, row)
 
     monkeypatch.setattr(job_run, "_append_record", failing)
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.message.startswith("중요:") and "처리기록.csv" in report.message.splitlines()[0]
     assert report.stopped and report.has_news
@@ -559,10 +559,10 @@ def test_processed_file_left_open_is_not_held(env, monkeypatch):
     work, inp, out = env
     job = _job(work, inp, out)
     held = _drop(INV, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     monkeypatch.setattr(job_run, "is_locked", lambda path: Path(path) == held)  # PDF 뷰어에 열어 둔 채
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts == dict.fromkeys(report.counts, 0) and not report.has_news
 
@@ -577,7 +577,7 @@ def test_locked_ledger_is_reported_and_held_files_not_unmatched(env, monkeypatch
         raise job_run.LedgerLocked(str(path))
 
     monkeypatch.setattr(job_run.Ledger, "open", classmethod(locked))
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["보류"] == 2 and report.counts["성공"] == 0
     assert report.ledger_locked and report.has_news
@@ -586,7 +586,7 @@ def test_locked_ledger_is_reported_and_held_files_not_unmatched(env, monkeypatch
     assert [r["상태"] for r in load_records(job)] == ["보류", "보류"]
 
     monkeypatch.undo()
-    assert run_job(job, work).counts["성공"] == 2  # 엑셀을 닫으면 다음 실행 때 처리
+    assert run_job(job, work, gate=None).counts["성공"] == 2  # 엑셀을 닫으면 다음 실행 때 처리
 
 
 def test_company_form_is_checked_under_temp_name_before_final(env, monkeypatch):
@@ -602,7 +602,7 @@ def test_company_form_is_checked_under_temp_name_before_final(env, monkeypatch):
         return real(path, *args)
 
     monkeypatch.setattr(job_run, "read_back", spy)
-    run_job(job, work)
+    run_job(job, work, gate=None)
 
     assert len(seen) == 1
     checked, final_existed = seen[0]
@@ -615,11 +615,11 @@ def test_rollback_keeps_last_good_backup(env, monkeypatch):
     work, inp, out = env
     job = _job(work, inp, out, mode="누적장부")
     _drop(INV, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     _drop(PDFS / "INV-2026-10278.pdf", inp)
     monkeypatch.setattr(job_run, "_ledger_problems", lambda *a, **k: ["다름"])
 
-    run_job(job, work)
+    run_job(job, work, gate=None)
 
     backup = out / f"누적장부_{TITLE}.bak.xlsx"
     assert [r["인보이스번호"] for r in _rows(backup, "Invoice")] == ["INV-2026-10231"]
@@ -635,12 +635,12 @@ def test_scan_errors_become_warnings(env, monkeypatch):
         raise OSError("입력 폴더를 읽을 수 없음")
 
     monkeypatch.setattr(job_run, "unmatched_files", broken)
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
     assert report.counts["성공"] == 1 and "입력 폴더를 읽을 수 없음" in report.message
 
     real = Path.iterdir
     monkeypatch.setattr(Path, "iterdir", lambda self: broken() if self == inp else real(self))
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
     assert "경고" in report.message and "입력 폴더를 읽을 수 없음" in report.message
 
 
@@ -649,7 +649,7 @@ def test_real_ledger_read_back_mismatch_rolls_back_only_that_document(env, monke
     work, inp, out = env
     job = _job(work, inp, out, mode="누적장부")
     _drop(INV, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     _drop(PDFS / "INV-2026-10278.pdf", inp)
     real_save = job_run.Ledger.save
     calls = []
@@ -667,7 +667,7 @@ def test_real_ledger_read_back_mismatch_rolls_back_only_that_document(env, monke
             wb.save(self.path)
 
     monkeypatch.setattr(job_run.Ledger, "save", save_then_corrupt)
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["확인필요"] == 1 and report.counts["성공"] == 0
     text = (job.folder / "확인필요" / "INV-2026-10278.pdf.txt").read_text(encoding="utf-8")
@@ -681,14 +681,14 @@ def test_success_removes_stale_review_note(env, monkeypatch):
     job = _job(work, inp, out)
     _drop(INV, inp)
     monkeypatch.setattr(job_run, "verify", lambda result, path: [Check("합계금액", "1", "2", False)])
-    run_job(job, work)
+    run_job(job, work, gate=None)
     note = job.folder / "확인필요" / "INV-2026-10231.pdf.txt"
     assert note.is_file()
 
     monkeypatch.undo()
     with open(job.rules_path, "a", encoding="utf-8") as f:
         f.write("\n# 규칙을 고침\n")
-    assert run_job(job, work).counts["성공"] == 1
+    assert run_job(job, work, gate=None).counts["성공"] == 1
     assert not note.exists()
 
 
@@ -700,7 +700,7 @@ def test_review_notes_for_same_stem_do_not_collide(env):
     openpyxl.Workbook().save(empty)  # 글자 없는 엑셀 = 확인필요
     os.utime(empty, (time.time() - 3600,) * 2)
 
-    assert run_job(job, work).counts["확인필요"] == 2
+    assert run_job(job, work, gate=None).counts["확인필요"] == 2
     assert _files(job.folder / "확인필요") == ["문서.pdf.txt", "문서.xlsx.txt"]
 
 
@@ -718,7 +718,7 @@ def test_approval_run_with_locked_ledger_keeps_waiting_state(env, monkeypatch):
         raise job_run.LedgerLocked(str(path))
 
     monkeypatch.setattr(job_run.Ledger, "open", classmethod(locked))
-    approval = run_job(job, work, source_dir=job.folder / "승인대기")
+    approval = run_job(job, work, source_dir=job.folder / "승인대기", gate=None)
     assert approval.counts["보류"] == 1 and approval.ledger_locked
     monkeypatch.undo()
 
@@ -728,7 +728,7 @@ def test_approval_run_with_locked_ledger_keeps_waiting_state(env, monkeypatch):
     assert _files(job.folder / "승인대기") == ["INV-2026-10231.pdf"]
     assert _files(job.folder / "승인대기" / "대조표") == ["검산_INV-2026-10231.xlsx"]
     assert load_records(job)[-1]["상태"] == "승인대기"
-    assert run_job(job, work, source_dir=job.folder / "승인대기").counts["성공"] == 1  # 엑셀을 닫으면 승인됨
+    assert run_job(job, work, source_dir=job.folder / "승인대기", gate=None).counts["성공"] == 1  # 엑셀을 닫으면 승인됨
 
 
 def _assert_stopped(report, *words):
@@ -745,7 +745,7 @@ def test_record_file_open_at_start_is_reported(env, monkeypatch):
     record = job.folder / RECORD_FILE
     monkeypatch.setattr(job_run, "is_locked", lambda path: Path(path) == record)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     _assert_stopped(report, RECORD_FILE, "닫고 다시 실행하세요")
     assert _files(out) == [] and report.counts["성공"] == 0
@@ -756,7 +756,7 @@ def test_broken_rules_are_reported(env):
     job = _job(work, inp, out, rules_text="문서종류: [깨진\n")
     _drop(INV, inp)
 
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     _assert_stopped(report, "규칙.yaml", "규칙 고쳐 줘")
     assert _files(out) == []
@@ -766,7 +766,7 @@ def test_missing_company_form_rule_is_reported(env):
     work, inp, out = env
     job = _job(work, inp, out, mode="회사양식", rules_text=_only("Invoice"))
     _drop(INV, inp)
-    _assert_stopped(run_job(job, work), "회사양식")
+    _assert_stopped(run_job(job, work, gate=None), "회사양식")
 
 
 def test_unreadable_record_file_is_reported(env):
@@ -774,7 +774,7 @@ def test_unreadable_record_file_is_reported(env):
     job = _job(work, inp, out)
     _drop(INV, inp)
     (job.folder / RECORD_FILE).write_bytes("지문,파일\n가나다".encode("cp949"))
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
     _assert_stopped(report, RECORD_FILE)
     assert _files(out) == []
 
@@ -787,14 +787,14 @@ def test_duplicate_removes_stale_review_note(env, monkeypatch):
     os.utime(resent, (time.time() - 3600,) * 2)
     monkeypatch.setattr(job_run, "verify", lambda result, path: [Check("합계금액", "1", "2", False)])
     now = datetime.now().replace(microsecond=0)
-    run_job(job, work, now=now)
+    run_job(job, work, now=now, gate=None)
     note = job.folder / "확인필요" / "INV-2026-10231_재발송.pdf.txt"
     assert note.is_file()
     monkeypatch.undo()
     _drop(INV, inp)
-    assert run_job(job, work, now=now).counts["성공"] == 1  # 재발송본은 같은 날이라 건너뜀
+    assert run_job(job, work, now=now, gate=None).counts["성공"] == 1  # 재발송본은 같은 날이라 건너뜀
 
-    report = run_job(job, work, now=now + timedelta(days=1))
+    report = run_job(job, work, now=now + timedelta(days=1), gate=None)
 
     assert report.counts["중복"] == 1
     assert not note.exists()
@@ -814,7 +814,7 @@ def test_one_document_error_does_not_stop_others(env, monkeypatch):
         return real_add(self, result, *args, **kwargs)
 
     monkeypatch.setattr(job_run.Ledger, "add", flaky_add)
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1 and report.counts["확인필요"] == 1
     assert "흉내: 기록 실패" in (job.folder / "확인필요" / "DM-2026-0092.pdf.txt").read_text(encoding="utf-8")
@@ -838,14 +838,14 @@ def test_adding_customer_to_master_retries_same_day(env, tmp_path):
     job = _job(work, inp, out, mode="회사양식", rules_text=PDF_PO_RULES)
     _drop(_fixtures(tmp_path) / "ACME_PO_PO-77001.pdf", inp)
 
-    first = run_job(job, work)
+    first = run_job(job, work, gate=None)
     assert first.counts["확인필요"] == 1
     note = next((job.folder / "확인필요").glob("*.txt")).read_text(encoding="utf-8")
     assert "고객마스터.xlsx 에 줄을 더한 뒤 지금 실행을 누르면 다시 처리합니다" in note
-    assert run_job(job, work).counts["확인필요"] == 0  # 같은 날 · 그대로면 다시 시도하지 않는다
+    assert run_job(job, work, gate=None).counts["확인필요"] == 0  # 같은 날 · 그대로면 다시 시도하지 않는다
 
     _master(work, [["Someone Else", "C-KR-0009", "Net 30"], ["ACME Semiconductor Korea", "C-KR-0001", "Net 30"]])
-    report = run_job(job, work)
+    report = run_job(job, work, gate=None)
 
     assert report.counts["성공"] == 1, report.message
     assert (out / "회사양식_SO입력_PO-77001.xlsx").exists()
@@ -856,5 +856,5 @@ def test_master_not_mixed_when_company_form_does_not_use_it(env):
     work, inp, out = env
     job = _job(work, inp, out, mode="누적장부", rules_text=_only("Invoice"))
     _drop(INV, inp)
-    run_job(job, work)
+    run_job(job, work, gate=None)
     assert load_records(job)[0]["규칙지문"] == rules_fingerprint(job)
