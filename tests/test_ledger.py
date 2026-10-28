@@ -79,6 +79,24 @@ def test_add_row_persists_with_formats(book, rules):
     assert re.fullmatch(r"A1:[A-Z]+2", ref)
 
 
+def test_save_without_backup_keeps_previous_backup(book, rules):
+    """되돌리기 저장(backup=False)은 바로 전 판(.bak)을 덮지 않는다. .bak 에는 마지막 좋은 상태가 남는다."""
+    backup = book.with_name("누적장부.bak.xlsx")
+    ledger = Ledger.open(book, rules)
+    _add(ledger, INVOICE, rules)
+    ledger.save()
+    _add(ledger, DM, rules)
+    ledger.save()  # .bak = Invoice 만 있던 판
+    assert len(_data_rows(openpyxl.load_workbook(backup)["Invoice"])) == 1
+    assert _data_rows(openpyxl.load_workbook(backup)["DM"]) == []
+
+    ledger.remove("DM", "DM-2026-0092")
+    ledger.save(backup=False)
+    assert _data_rows(openpyxl.load_workbook(book)["DM"]) == []
+    assert _data_rows(openpyxl.load_workbook(backup)["DM"]) == []  # 되돌린 DM 줄이 .bak 에 남지 않음
+    assert len(_data_rows(openpyxl.load_workbook(backup)["Invoice"])) == 1
+
+
 def test_duplicate_detected_after_reopen(book, rules):
     ledger = Ledger.open(book, rules)
     _add(ledger, INVOICE, rules)

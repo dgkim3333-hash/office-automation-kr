@@ -73,12 +73,21 @@ def _save(wb, folder, name) -> Path:
     return path
 
 
-def write_company_form(folder, result, master_row, form) -> Path:
+def company_workbook(result, master_row, form):
+    """회사 양식 통합문서(저장 전). 저장 위치 · 이름은 부르는 쪽이 정한다."""
     header, rows = company_rows(result, master_row, form)
     wb = openpyxl.Workbook()
     wb.active.title = form.sheet
     _write_sheet(wb.active, header, rows)
-    return _save(wb, folder, render_text(form.filename_tpl, result.fields))
+    return wb
+
+
+def company_form_name(result, form) -> str:
+    return render_text(form.filename_tpl, result.fields)
+
+
+def write_company_form(folder, result, master_row, form) -> Path:
+    return _save(company_workbook(result, master_row, form), folder, company_form_name(result, form))
 
 
 def extract_result_rows(result, source_name):

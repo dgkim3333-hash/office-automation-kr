@@ -89,7 +89,7 @@ def test_pdf_job_counts_and_leaves_originals(env):
         "DM-2026-0092.pdf": "성공", "DM-2026-0097.pdf": "성공",
         "Scan_signed_packing_list.pdf": "확인필요",
     }  # 판별되지 않은 서신은 기록하지 않고 그대로 둔다
-    assert sorted(p.name for p in (pdf_job.folder / "확인필요").iterdir()) == ["Scan_signed_packing_list.txt"]
+    assert sorted(p.name for p in (pdf_job.folder / "확인필요").iterdir()) == ["Scan_signed_packing_list.pdf.txt"]
     assert len(list((pdf_job.folder / "검산").glob("검산_*.xlsx"))) == 4
     assert sorted(p.name for p in out.iterdir() if not p.name.endswith(".bak.xlsx")) == ["누적장부_PDF 장부.xlsx"]
 

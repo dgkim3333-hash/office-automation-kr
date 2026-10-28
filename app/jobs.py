@@ -79,6 +79,27 @@ def _check_folder(path, label: str) -> Path:
     return path
 
 
+def _same_title_folder(root: Path, safe: str) -> Path | None:
+    """폴더 이름(NN_제목)의 제목 부분이 safe 와 같은(대소문자 무시) 작업 폴더. 깨진 작업도 본다."""
+    if not root.is_dir():
+        return None
+    for child in root.iterdir():
+        m = _NUMBER_PREFIX.match(child.name)
+        if child.is_dir() and m and child.name[m.end():].casefold() == safe.casefold():
+            return child
+    return None
+
+
+def _norm(path) -> str:
+    return os.path.normcase(os.path.abspath(Path(path).resolve()))
+
+
+def _overlaps(a, b) -> bool:
+    """같은 폴더이거나 한쪽이 다른 쪽 안에 있으면 True."""
+    a, b = _norm(a), _norm(b)
+    return a == b or a.startswith(b.rstrip(os.sep) + os.sep) or b.startswith(a.rstrip(os.sep) + os.sep)
+
+
 def _next_number(root: Path) -> int:
     """지금까지 쓴 가장 큰 번호 + 1. 지운 작업의 번호는 마지막번호.txt 가 기억해 다시 쓰지 않는다."""
     numbers = []
@@ -108,9 +129,18 @@ def create_job(work, title: str, input_dir, output_dir, output_mode: str) -> Job
     safe = _folder_title(title)
     if not safe:
         raise JobError("작업 제목이 비어 있습니다.")
+    root = _jobs_root(work)
+    taken = _same_title_folder(root, safe)
+    if taken is not None:
+        raise JobError(
+            f"같은 이름의 작업이 이미 있습니다: {taken.name}\n"
+            "누적장부 파일 이름에 작업 제목이 들어가므로 다른 제목을 쓰세요(대소문자 · 앞뒤 공백 · 못 쓰는 글자 차이는 같은 이름으로 봅니다).")
     input_dir = _check_folder(input_dir, "입력")
     output_dir = _check_folder(output_dir, "출력")
-    root = _jobs_root(work)
+    if _overlaps(input_dir, output_dir):
+        raise JobError(
+            "입력 폴더와 출력 폴더는 서로 다른 폴더여야 합니다(한쪽이 다른 쪽 안에 있어도 안 됩니다). "
+            f"결과 파일이 다시 입력으로 읽히기 때문입니다.\n입력: {input_dir}\n출력: {output_dir}")
     number = _next_number(root)
     folder = root / f"{number:02d}_{safe}"
     folder.mkdir(parents=True)

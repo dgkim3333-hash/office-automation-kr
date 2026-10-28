@@ -45,12 +45,32 @@ def test_second_job_gets_next_slot(dirs):
     assert second.number == 2 and second.run_time == "16:20"
 
 
-def test_title_with_forbidden_characters_and_duplicates(dirs):
+def test_title_with_forbidden_characters(dirs):
     work, inp, out = dirs
     a = create_job(work, "PO/DM 정리?", inp, out, "누적장부")
-    b = create_job(work, "PO/DM 정리?", inp, out, "누적장부")
-    assert a.folder.name == "01_PO_DM 정리_" and b.folder.name == "02_PO_DM 정리_"
-    assert find_job(work, "2").folder == b.folder and find_job(work, "02_PO_DM 정리_").folder == b.folder
+    b = create_job(work, "다른 작업", inp, out, "누적장부")
+    assert a.folder.name == "01_PO_DM 정리_" and b.folder.name == "02_다른 작업"
+    assert find_job(work, "1").folder == a.folder and find_job(work, "01_PO_DM 정리_").folder == a.folder
+
+
+@pytest.mark.parametrize("again", ["PO/DM 정리?", "  po/dm 정리?  ", "PO:DM 정리*"])
+def test_duplicate_title_rejected(dirs, again):
+    """누적장부 이름에 제목이 들어가므로 같은 제목(대소문자 · 앞뒤 공백 · 못 쓰는 글자 차이 무시)은 안 된다."""
+    work, inp, out = dirs
+    create_job(work, "PO/DM 정리?", inp, out, "누적장부")
+    with pytest.raises(JobError, match="같은 이름의 작업"):
+        create_job(work, again, inp, out, "누적장부")
+    assert [p.name for p in (work / "작업").iterdir() if p.is_dir()] == ["01_PO_DM 정리_"]
+
+
+def test_input_and_output_must_differ(dirs, tmp_path):
+    work, inp, out = dirs
+    inner = inp / "결과"
+    inner.mkdir()
+    for i, o in ((inp, inp), (inp, inner), (inner, inp)):
+        with pytest.raises(JobError, match="입력 폴더와 출력 폴더"):
+            create_job(work, "작업", i, o, "누적장부")
+    assert not (work / "작업").exists()
 
 
 def test_title_trimmed_and_cut_to_30(dirs):

@@ -25,7 +25,9 @@ from app.local_guard import LocalOnlyError, check_work_dir
 from app.log import append_log
 from app.master import MasterError, load_master, lookup
 from app.organize import free_name
-from app.outputs import _same_value, _text, company_rows, read_back, write_check_file, write_company_form
+from app.outputs import (
+    _same_value, _text, company_form_name, company_rows, company_workbook, read_back, write_check_file,
+)
 from app.rules import RuleError, load_rules
 from app.verify import failed, verify
 
@@ -54,6 +56,7 @@ RETRY_NOTE = "규칙.yaml 을 고치면 다음 실행 때 다시 시도합니다
 HELD_REASON = "다른 프로그램(PDF 뷰어 · 엑셀 등)에서 열려 있음. 닫으면 다음 실행 때 처리합니다"
 SETTLING_REASON = "방금 바뀐 파일(1분 안). 저장이 끝난 뒤 다음 실행 때 처리합니다"
 LEDGER_LOCKED_REASON = "누적장부가 엑셀에서 열려 있음. 엑셀을 닫으면 다음 실행 때 처리합니다"
+INTERRUPTED = "처리기록에 없음. 지난 실행이 중간에 끊겼을 수 있음"
 
 
 class JobLocked(Exception):
@@ -66,11 +69,15 @@ class RunReport:
     unmatched_old: int = 0
     message: str = ""
     output_files: list[Path] = field(default_factory=list)
+    ledger_locked: bool = False  # 누적장부가 엑셀에서 열려 있어 보류한 파일이 있음
+    stopped: bool = False        # 처리기록을 쓰지 못해 중간에 멈춤(message 맨 앞에 「중요:」)
 
     @property
     def has_news(self) -> bool:
-        """알릴 것이 있나. 보류만 있으면 알리지 않는다(다음 실행 때 처리됨)."""
-        return any(self.counts.get(k, 0) > 0 for k in NEWS_KEYS) or self.unmatched_old > 0
+        """알릴 것이 있나. 보통 보류만 있으면 알리지 않지만(다음 실행 때 처리됨), 누적장부가 열려 있어
+        보류한 것은 사람이 엑셀을 닫아야 풀리므로 알린다."""
+        return (any(self.counts.get(k, 0) > 0 for k in NEWS_KEYS) or self.unmatched_old > 0
+                or self.ledger_locked or self.stopped)
 
 
 # --- 같은 작업 두 번 실행 막기 ---
@@ -265,6 +272,10 @@ def _ledger_problems(path, result, doc_values: dict) -> list[str]:
 
 # --- 실행 한 번 ---
 
+class _StopRun(Exception):
+    """처리기록을 쓰지 못해 실행을 멈춰야 할 때. 한 건 오류 처리(except Exception)가 삼키지 않게 다시 던진다."""
+
+
 class _Run:
     def __init__(self, job, work, now, source, gate, on_success):
         self.job = job
@@ -276,8 +287,10 @@ class _Run:
         self.on_success = on_success
         self.report = RunReport()
         self.warnings: list[str] = []
+        self.stop_reason = ""
         self.ledger = None
         self.ledger_locked = False
+        self.ledger_held = 0  # 누적장부가 열려 있어 보류한 파일 수
         self.master = None
         # 승인 실행(승인대기\ 를 읽음)이면 승인대기 기록을 건너뛰지 않는다
         self.approving = _same_dir(source, Path(job.folder) / WAITING)
@@ -317,15 +330,28 @@ class _Run:
             return RunReport(message=f"{RECORD_FILE} 를 읽지 못했습니다: {e}")
         self.success_keys = {(r.get("문서종류"), r.get("번호")) for r in self.state.values() if r.get("상태") == "성공"}
 
-        for path in self._candidates():
-            self._one(path)
+        try:
+            candidates = self._candidates()
+        except OSError as e:
+            candidates = []
+            self.warnings.append(f"경고: 입력 폴더를 읽지 못함 ({self.source}): {e}")
+        try:
+            for path in candidates:
+                self._one(path)
+        except _StopRun as e:
+            self.stop_reason = str(e)
+            self.report.stopped = True
 
         self.job.last_run = self.today
         try:
             save_job(self.job)
         except OSError as e:
             self.warnings.append(f"경고: 작업설정.yaml 에 마지막 실행 날짜를 쓰지 못함 ({e})")
-        self.report.unmatched_old = unmatched_old(self.job, self.work, self.now)
+        try:
+            self.report.unmatched_old = unmatched_old(self.job, self.work, self.now)
+        except Exception as e:  # 마지막 집계가 실패해도 이번 실행 결과(보고)는 잃지 않는다
+            self.warnings.append(f"경고: 입력 폴더에 남은 파일을 세지 못함 ({e})")
+        self.report.ledger_locked = self.ledger_locked
         self.report.message = self._message()
         return self.report
 
@@ -343,15 +369,15 @@ class _Run:
         if age < SETTLE_SECONDS:
             self._done(path, "보류", SETTLING_REASON)
             return
-        if os.access(path, os.W_OK) and is_locked(path):  # 읽기 전용 파일은 잠김 검사가 늘 실패하므로 건너뜀
-            self._done(path, "보류", HELD_REASON)
-            return
         try:
             fp = file_fingerprint(path)
         except OSError:
             self._done(path, "보류", HELD_REASON)
             return
-        if self._skip(fp):
+        if self._skip(fp):  # 이미 처리한 원본은 PDF 뷰어에 열려 있어도 보류로 세지 않는다
+            return
+        if os.access(path, os.W_OK) and is_locked(path):  # 읽기 전용 파일은 잠김 검사가 늘 실패하므로 건너뜀
+            self._done(path, "보류", HELD_REASON)
             return
         try:
             result = read_excel(path, self.rules) if path.suffix.lower() == ".xlsx" else extract(path, self.rules)
@@ -370,6 +396,8 @@ class _Run:
             return
         try:
             self._process(path, fp, result, key)
+        except _StopRun:
+            raise
         except Exception as e:  # 한 건의 오류가 나머지를 막지 않게
             self._review(path, fp, result, f"처리 중 오류: {e}")
 
@@ -384,7 +412,7 @@ class _Run:
             return not self.approving
         if status == "확인필요":
             return row.get("날짜") == self.today and row.get("규칙지문") == self.rules_fp
-        return False
+        return False  # 보류: 다음 실행 때 다시
 
     def _process(self, path, fp, result, key):
         checks = verify(result, path)
@@ -429,6 +457,7 @@ class _Run:
             self._review(path, fp, result, f"승인대기로 보내지 못함: {e}")
             return
         self._record(path, fp, result, "승인대기")
+        self._clear_note(path)
         self._done(path, "승인대기", "")
 
     def _open_ledger(self):
@@ -436,11 +465,30 @@ class _Run:
             self.ledger = Ledger.open(ledger_path(self.job), self.rules)
         return self.ledger
 
+    def _hold_for_ledger(self, path, fp, result):
+        """누적장부가 엑셀에서 열려 있어 보류. 판별된 파일이라는 표시로 처리기록에 보류를 남긴다
+        (「어느 작업에도 맞지 않는 파일」 로 세지 않게). 보류 기록은 건너뛰지 않으므로 다음 실행 때 다시 처리한다."""
+        self.ledger_held += 1
+        self._record(path, fp, result, "보류")
+        self._done(path, "보류", LEDGER_LOCKED_REASON)
+
     def _write(self, path, fp, result, key, checks, master_row):
-        """출력: 누적장부 · 회사 양식. 저장한 뒤 다시 읽어 다르면 이번 건만 되돌리고 확인필요."""
+        """출력: 누적장부 · 회사 양식. 저장한 뒤 다시 읽어 다르면 이번 건만 되돌리고 확인필요.
+
+        여기까지 왔으면 처리기록에는 이 (문서종류, 번호)의 성공이 없다. 그런데 결과가 이미 있으면
+        지난 실행이 결과를 쓴 뒤 기록 전에 끊긴 것일 수 있으므로, 다시 쓰지 않고 확인필요로 보낸다.
+        """
         mode = self.job.output_mode
+        form = self.rules.company_form
+        final = None
+        if mode in COMPANY_MODES:
+            final = Path(self.job.output_dir) / company_form_name(result, form)
+            if final.exists():
+                self._review(path, fp, result, f"출력 폴더에 회사 양식 {final.name} 이 이미 있는데 {INTERRUPTED}. "
+                             "그 파일이 이 문서의 결과가 맞는지 확인하세요(두 번 입력하지 않도록 새로 만들지 않았습니다)")
+                return
         if mode in LEDGER_MODES and self.ledger_locked:
-            self._done(path, "보류", LEDGER_LOCKED_REASON)
+            self._hold_for_ledger(path, fp, result)
             return
         ledger, added, saved, company = None, False, False, None
         problems = []
@@ -448,8 +496,8 @@ class _Run:
             if mode in LEDGER_MODES:
                 ledger = self._open_ledger()
                 if ledger.is_duplicate(*key):
-                    self._record(path, fp, result, "중복")
-                    self._done(path, "중복", f"{key[0]} {key[1]} 이미 누적장부에 있음")
+                    hint = " 출력 폴더에 회사 양식이 있는지 확인하세요" if mode in COMPANY_MODES else ""
+                    self._review(path, fp, result, f"누적장부에는 {key[0]} {key[1]} 이 있는데 {INTERRUPTED}.{hint}")
                     return
                 doc_values = {"처리일시": self.now, "원본파일": path.name, "정리된경로": str(path), **result.fields}
                 ledger.add(result, path.name, path, processed_at=self.now)
@@ -460,18 +508,15 @@ class _Run:
                     problems += _ledger_problems(ledger.path, result, doc_values)
                 except Exception as e:
                     problems.append(f"저장한 누적장부를 다시 읽지 못함: {e}")
-            if mode in COMPANY_MODES:
-                form = self.rules.company_form
-                company = write_company_form(self.job.output_dir, result, master_row, form)
-                header, rows = company_rows(result, master_row, form)
-                try:
-                    problems += read_back(company, form.sheet, header, rows)
-                except Exception as e:
-                    problems.append(f"저장한 회사 양식 파일을 다시 읽지 못함: {e}")
+            if mode in COMPANY_MODES and not problems:
+                company, more = self._write_company(final, result, master_row, form)
+                problems += more
+        except _StopRun:
+            raise
         except LedgerLocked:
             self.ledger_locked = True
             self._rollback(ledger, added, saved, key, company)
-            self._done(path, "보류", LEDGER_LOCKED_REASON)
+            self._hold_for_ledger(path, fp, result)
             return
         except Exception as e:
             undo = self._rollback(ledger, added, saved, key, company)
@@ -487,18 +532,46 @@ class _Run:
             write_check_file(Path(self.job.folder) / CHECKS, result, checks, path.name)
         except Exception as e:  # 결과는 이미 나갔으므로 알리기만 한다
             self.warnings.append(f"경고: 검산 파일을 만들지 못함 ({path.name}): {e}")
-        self._record(path, fp, result, "성공")
-        self.success_keys.add(key)
         if company is not None:
             self.report.output_files.append(company)
         if ledger is not None and ledger.path not in self.report.output_files:
             self.report.output_files.append(ledger.path)
+        self._record(path, fp, result, "성공")  # 못 쓰면 _StopRun 으로 실행을 멈춘다
+        self.success_keys.add(key)
+        self._clear_note(path)
         self._done(path, "성공", "; ".join(result.warnings))
         if self.on_success is not None:
             try:
                 self.on_success(self.job, result)
             except Exception as e:
                 self.warnings.append(f"경고: 성공 처리 뒤 작업을 하지 못함 ({path.name}): {e}")
+
+    def _write_company(self, final, result, master_row, form):
+        """회사 양식을 임시 이름으로 저장 → 다시 읽어 대조 → 같을 때만 최종 이름으로 바꾼다.
+
+        다시 읽기를 통과하지 않은 파일이 최종 이름으로 보이는 일이 없다. (만든 파일 또는 None, 문제 목록)
+        """
+        tmp = final.with_name(f".{final.stem}.tmp{final.suffix}")
+        problems = []
+        try:
+            company_workbook(result, master_row, form).save(tmp)
+            header, rows = company_rows(result, master_row, form)
+            try:
+                problems += read_back(tmp, form.sheet, header, rows)
+            except Exception as e:
+                problems.append(f"저장한 회사 양식 파일을 다시 읽지 못함: {e}")
+            if problems:
+                return None, problems
+            if final.exists():
+                return None, [f"저장하는 사이 출력 폴더에 {final.name} 이 생겼습니다"]
+            os.replace(tmp, final)
+            return final, []
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     def _rollback(self, ledger, added, saved, key, company) -> str:
         """이번 건이 쓴 것을 되돌린다. 되돌리지 못한 것이 있으면 사유에 붙일 글자를 돌려준다."""
@@ -507,7 +580,7 @@ class _Run:
             ledger.remove(*key)
             if saved:
                 try:
-                    ledger.save()
+                    ledger.save(backup=False)  # .bak 에는 마지막 좋은 상태를 남긴다
                 except Exception as e:
                     notes.append(f"누적장부에서 이 문서 줄을 지우지 못함({e}). 누적장부를 열어 직접 지우세요")
         if company is not None and company.exists():
@@ -532,15 +605,27 @@ class _Run:
         try:
             _append_record(self.job, row)
         except OSError as e:
-            self.warnings.append(f"경고: {RECORD_FILE} 에 쓰지 못함 ({path.name}, {status}): {e}")
+            # 기록 없이 계속하면 다음 실행이 같은 문서를 또 내보낼 수 있다(주문 두 번 입력). 여기서 멈춘다
+            raise _StopRun(f"{RECORD_FILE} 에 쓰지 못해 실행을 멈췄습니다({path.name}, {status}: {e}). "
+                           f"이 파일의 결과는 이미 만들어졌을 수 있으니 출력 폴더를 확인하세요. "
+                           f"남은 파일은 처리하지 않았습니다. {RECORD_FILE} 를 연 프로그램을 닫고 다시 실행하세요.") from e
         self.state[fp] = row
 
-    def _review(self, path, fp, result, reason):
-        folder = Path(self.job.folder) / REVIEW
+    def _note_path(self, path) -> Path:
+        return Path(self.job.folder) / REVIEW / f"{path.name}.txt"
+
+    def _clear_note(self, path):
+        """이 파일이 지난번에 남긴 확인필요 사유 파일을 지운다(이제 처리됐으므로)."""
         try:
-            folder.mkdir(parents=True, exist_ok=True)
-            note = f"원본: {path}\n사유: {reason}\n\n{RETRY_NOTE}\n"
-            (folder / f"{path.stem}.txt").write_text(note, encoding="utf-8")
+            self._note_path(path).unlink(missing_ok=True)
+        except OSError as e:
+            self.warnings.append(f"경고: 지난 확인필요 사유 파일을 지우지 못함 ({path.name}): {e}")
+
+    def _review(self, path, fp, result, reason):
+        note = self._note_path(path)
+        try:
+            note.parent.mkdir(parents=True, exist_ok=True)
+            note.write_text(f"원본: {path}\n사유: {reason}\n\n{RETRY_NOTE}\n", encoding="utf-8")
         except OSError as e:
             self.warnings.append(f"경고: 확인필요 사유 파일을 쓰지 못함 ({path.name}): {e}")
         self._record(path, fp, result, "확인필요")
@@ -558,7 +643,13 @@ class _Run:
         parts = [f"{k} {counts[k]}" for k in NEWS_KEYS]
         if counts["보류"]:
             parts.append(f"보류 {counts['보류']}")
-        lines = [f"{self.job.title}: " + " · ".join(parts)]
+        lines = []
+        if self.stop_reason:
+            lines.append(f"중요: {self.stop_reason}")
+        lines.append(f"{self.job.title}: " + " · ".join(parts))
+        if self.ledger_locked:
+            lines.append(f"누적장부가 엑셀에서 열려 있어 파일 {self.ledger_held}개를 처리하지 못했습니다(보류). "
+                         f"엑셀을 닫으면 다음 실행 때 처리합니다: {ledger_path(self.job)}")
         folder = Path(self.job.folder)
         if counts["확인필요"]:
             lines.append(f"확인필요 폴더의 .txt 를 열어 사유를 보세요: {folder / REVIEW}")
@@ -566,8 +657,6 @@ class _Run:
             lines.append(f"승인대기 폴더의 대조표를 확인한 뒤 승인하세요: {folder / WAITING / WAITING_CHECKS}")
         if counts["보류"]:
             lines.append("보류 파일은 입력 폴더에 그대로 있고 다음 실행 때 처리합니다.")
-        if self.ledger_locked:
-            lines.append(f"누적장부가 엑셀에서 열려 있습니다. 엑셀을 닫아 두세요: {ledger_path(self.job)}")
         if self.report.unmatched_old:
             lines.append(f"어느 작업에도 맞지 않는 파일 {self.report.unmatched_old}개가 입력 폴더에 하루 넘게 "
                          f"남아 있습니다: {self.job.input_dir}")

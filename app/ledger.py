@@ -154,7 +154,8 @@ class Ledger:
         names = [d.name for d in self.rules.doc_types] + [ITEMS_SHEET, LOG_SHEET]
         return [self.wb[n] for n in names]
 
-    def save(self):
+    def save(self, backup=True):
+        """저장. backup=False 는 되돌리기 저장용: 바로 전 판(.bak)을 덮지 않아 마지막 좋은 상태가 남는다."""
         for ws in self.wb.worksheets:  # 이름 충돌이 없도록 우리 표를 먼저 전부 지운 뒤
             for name in [t for t in ws.tables if t.startswith(TABLE_PREFIX)]:
                 del ws.tables[name]
@@ -166,11 +167,11 @@ class Ledger:
         for ws in self.wb.worksheets:
             ws.sheet_view.tabSelected = ws is first
         tmp = self.path.with_name(f".{self.path.stem}.tmp.xlsx")
-        backup = self.path.with_name(f"{self.path.stem}.bak{self.path.suffix}")
+        backup_path = self.path.with_name(f"{self.path.stem}.bak{self.path.suffix}")
         try:
             self.wb.save(tmp)
-            if self.path.exists():  # openpyxl 은 차트·그림을 보존하지 못하므로 바로 전 판을 남긴다
-                shutil.copyfile(self.path, backup)
+            if backup and self.path.exists():  # openpyxl 은 차트·그림을 보존하지 못하므로 바로 전 판을 남긴다
+                shutil.copyfile(self.path, backup_path)
             os.replace(tmp, self.path)
         except PermissionError:
             raise LedgerLocked(str(self.path)) from None
