@@ -32,10 +32,13 @@ class Table:
 
 @dataclass
 class CheckSpec:
-    """합계 검산에 쓸 필드 이름. 모두 그 문서종류의 '형식: 금액' 필드."""
+    """합계 검산에 쓸 필드 이름(모두 그 문서종류의 '형식: 금액' 필드)과 줄 검산 · 품목 합에 쓸 품목 열 이름."""
     subtotal: str | None
     extras: list[str]
     total: str | None
+    quantity: str = "수량"
+    price: str = "단가"
+    amount: str = "금액"
 
 
 @dataclass
@@ -150,7 +153,9 @@ def _excel_form(name, body, doc_types) -> ExcelForm:
         head[str(key)] = HeadCell(str(key), cell, fmt)
     if doc_type.number_field not in head:
         raise RuleError(f"{where} 머리에 번호필드 '{doc_type.number_field}' 가 있어야 합니다.")
-    return ExcelForm(name, doc_type.name, [str(k) for k in keywords], head, _excel_items(where, body.get("품목")))
+    items = _excel_items(where, body.get("품목"))
+    _check_columns(f"{where} 문서종류 {doc_type.name}", doc_type.check, items and items.columns, "품목")
+    return ExcelForm(name, doc_type.name, [str(k) for k in keywords], head, items)
 
 
 def _excel_items(where, spec) -> ExcelItems | None:
@@ -239,18 +244,36 @@ def _doc_type(name, body) -> DocType:
         if spec and fields[n].fmt != "날짜":
             raise RuleError(f"{where} 파일명의 {{{n}:{spec}}} 처럼 ':' 서식은 '형식: 날짜' 필드에만 쓸 수 있습니다.")
 
+    table = _table(where, body.get("표"))
+    check = _check_spec(where, body.get("검산"), fields)
+    _check_columns(where, check, table and table.columns, "표의")
+
     return DocType(
         name=name,
         keywords=[str(k) for k in keywords],
         number_field=number_field,
         fields=fields,
-        table=_table(where, body.get("표")),
+        table=table,
         filename_tpl=filename_tpl,
-        check=_check_spec(where, body.get("검산"), fields),
+        check=check,
     )
 
 
 CHECK_KEYS = ("소계", "부대비용", "합계")
+CHECK_COLUMN_KEYS = (("수량열", "quantity"), ("단가열", "price"), ("금액열", "amount"))
+
+
+def _check_columns(where, check, columns, what):
+    """검산에 쓰는 품목 열(적은 이름 또는 기본 수량 · 단가 · 금액)이 열 목록에 있어야 한다."""
+    if check is None or columns is None:
+        return
+    for key, attr in CHECK_COLUMN_KEYS:
+        name = getattr(check, attr)
+        if name not in columns:
+            raise RuleError(
+                f"{where} 검산의 {key} '{name}' 가 {what} 열 목록에 없습니다. "
+                f"검산 아래에 {key}: 열이름 처럼 실제 열 이름을 적으세요."
+            )
 
 
 def _check_spec(where, spec, fields) -> CheckSpec | None:
@@ -258,9 +281,17 @@ def _check_spec(where, spec, fields) -> CheckSpec | None:
         return None
     if not isinstance(spec, dict):
         raise RuleError(f"{where} 검산은 {{소계: 필드, 부대비용: [필드], 합계: 필드}} 처럼 적어야 합니다.")
+    allowed = CHECK_KEYS + tuple(k for k, _ in CHECK_COLUMN_KEYS)
     for key in spec:
-        if key not in CHECK_KEYS:
-            raise RuleError(f"{where} 검산의 '{key}' 는 쓸 수 없습니다. 소계 · 부대비용 · 합계만 됩니다.")
+        if key not in allowed:
+            raise RuleError(
+                f"{where} 검산의 '{key}' 는 쓸 수 없습니다. 소계 · 부대비용 · 합계 · 수량열 · 단가열 · 금액열만 됩니다."
+            )
+    if not spec:
+        raise RuleError(f"{where} 검산에 적은 것이 없습니다. 소계 · 부대비용 · 합계 중 하나 이상을 적거나 검산 줄을 지우세요.")
+    for key, value in spec.items():
+        if _blank(value):
+            raise RuleError(f"{where} 검산에 적은 것이 없습니다. '{key}' 에 이름을 적거나 그 줄을 지우세요.")
     extras = spec.get("부대비용") or []
     if not isinstance(extras, list):
         extras = [extras]
@@ -274,11 +305,21 @@ def _check_spec(where, spec, fields) -> CheckSpec | None:
             raise RuleError(f"{where} 검산의 '{n}' 은 '형식: 금액' 필드여야 합니다.")
     if extras and total is None:
         raise RuleError(f"{where} 검산의 부대비용은 합계와 함께 적어야 합니다.")
+    columns = {attr: str(spec.get(key, getattr(CheckSpec, attr))) for key, attr in CHECK_COLUMN_KEYS}
     return CheckSpec(
         subtotal=None if subtotal is None else str(subtotal),
         extras=[str(n) for n in extras],
         total=None if total is None else str(total),
+        **columns,
     )
+
+
+def _blank(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, list):
+        return not value or any(_blank(v) for v in value)
+    return not str(value).strip()
 
 
 def _field(where, name, spec) -> Field:

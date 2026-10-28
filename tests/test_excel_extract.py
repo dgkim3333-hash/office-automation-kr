@@ -71,3 +71,43 @@ def test_missing_label_is_warning_and_missing_number_is_required(rules, tmp_path
     assert r.fields["고객PO번호"] is None and r.missing_required is True
     assert r.fields["담당"] is None
     assert any("담당" in w for w in r.warnings)
+
+
+# --- 엑셀 float(수식 결과)은 엑셀처럼 유효 15자리 ---
+
+@pytest.mark.parametrize("value, expected", [
+    (0.30000000000000004, "0.3"),  # =3*0.1
+    (12.3, "12.3"),
+    (97000.0, "97000"),
+    (1234.5, "1234.5"),
+    (0.1 + 0.7, "0.8"),            # 0.7999999999999999
+    (2, "2"),
+])
+def test_excel_float_is_normalized_to_15_digits(value, expected):
+    from app.excel_extract import _as_amount, excel_number
+    assert str(excel_number(value)) == expected
+    assert str(_as_amount(value)) == expected
+
+
+def test_formula_float_in_items_becomes_clean_decimal(tmp_path, rules):
+    wb = openpyxl.load_workbook(ACME)
+    ws = wb.active
+    ws["D14"], ws["F14"], ws["G14"] = 3, 0.1, 0.375
+    path = tmp_path / "po.xlsx"
+    wb.save(path)
+    _raw_float(path, "0.375", "0.30000000000000004")
+    row = read_excel(path, rules).table[0]
+    assert row["단가"] == Decimal("0.1") and str(row["금액"]) == "0.3"
+
+
+def _raw_float(path, placeholder, raw):
+    """openpyxl 은 float 을 짧게 쓰므로, 엑셀이 저장하는 긴 값(=3*0.1 → 0.30000000000000004)을 XML 에 직접 넣는다."""
+    import zipfile
+    with zipfile.ZipFile(path) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    sheet = "xl/worksheets/sheet1.xml"
+    assert files[sheet].count(f"<v>{placeholder}</v>".encode()) == 1
+    files[sheet] = files[sheet].replace(f"<v>{placeholder}</v>".encode(), f"<v>{raw}</v>".encode())
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, data in files.items():
+            z.writestr(n, data)

@@ -10,13 +10,16 @@ from pathlib import Path
 
 import openpyxl
 
+from app.excel_extract import excel_number
 from app.extract import read_text, to_date
+from app.rules import CheckSpec
 
 # 원본 글자에서 숫자 · 날짜 토큰을 찾는 정규식. 숫자는 쉼표 · $ 를 뺀 Decimal(소수 자리 유지)로 바꾼다.
 NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 DATE = re.compile(r"(?=(?<!\d)(\d{1,4}[/\-]\d{1,2}[/\-]\d{1,4})(?!\d))")  # 겹쳐서 찾음. to_date 로 바뀌는 것만 날짜
 NOT_FOUND = "원본에 없음"
-LINE_COLUMNS = ("수량", "단가", "금액")
+# 번호 앞뒤에 이 글자가 붙어 있으면 더 긴 번호의 일부로 본다(INV-2026-1023 은 INV-2026-10231 의 일부)
+ID_CHARS = r"A-Za-z0-9_\-/"
 
 
 @dataclass
@@ -34,6 +37,7 @@ class _Source:
     numbers: dict = field(default_factory=dict)  # Decimal → 그 값을 준 원본 토큰들
     dates: dict = field(default_factory=dict)    # date(또는 datetime) → 원본 토큰들
     has_places: bool = False                     # PDF 만 소수 자리 정보가 있다
+    cells: set | None = None                     # 엑셀: 글자 칸 값(앞뒤 공백 뺌). 번호필드는 칸 하나와 같아야 함
 
     @property
     def text(self) -> str:
@@ -45,7 +49,9 @@ def verify(result, source_path) -> list[Check]:
     if result.doc_type is None:
         return []
     source = _excel_source(source_path) if result.is_excel else _pdf_source(source_path)
-    return _source_checks(result, source) + _line_checks(result.table) + _total_checks(result)
+    columns = result.doc_type.check or CheckSpec(None, [], None)
+    return (_source_checks(result, source) + _line_checks(result.table, columns)
+            + _total_checks(result))
 
 
 def failed(checks: list[Check]) -> list[Check]:
@@ -61,7 +67,7 @@ def _pdf_source(path) -> _Source:
 
 
 def _excel_source(path) -> _Source:
-    source = _Source()
+    source = _Source(cells=set())
     wb = openpyxl.load_workbook(Path(path), data_only=True)
     try:
         for ws in wb.worksheets:
@@ -77,6 +83,7 @@ def _add_cell(source, value):
     if value is None or isinstance(value, bool):
         return
     if isinstance(value, str):
+        source.cells.add(value.strip())
         _scan_text(source, value)
     elif isinstance(value, datetime):
         source.parts.append(value.isoformat(" "))
@@ -138,7 +145,7 @@ def _source_checks(result, source) -> list[Check]:
     checks = []
     for item, value in _targets(result):
         if isinstance(value, str):
-            ok = bool(value) and value in source.text
+            ok = _has_number_text(source, value)
             checks.append(Check(item, value if ok else NOT_FOUND, value, ok))
         elif isinstance(value, date):
             tokens = source.dates.get(value, [])
@@ -150,6 +157,16 @@ def _source_checks(result, source) -> list[Check]:
             if tokens and source.has_places and isinstance(value, Decimal):
                 checks.append(_places_check(item, value, tokens))
     return checks
+
+
+def _has_number_text(source, value: str) -> bool:
+    """번호필드 글자가 원본에 그대로, 더 긴 번호의 일부가 아니게 있는가."""
+    if not value.strip():
+        return False
+    if source.cells is not None:  # 엑셀: 칸 하나의 값과 같아야 함
+        return value.strip() in source.cells
+    pattern = rf"(?<![{ID_CHARS}.]){re.escape(value)}(?![{ID_CHARS}]|\.[A-Za-z0-9])"  # 문장 끝 마침표는 괜찮음
+    return re.search(pattern, source.text) is not None
 
 
 def _places_check(item, value, tokens) -> Check:
@@ -165,13 +182,13 @@ def _places(number: Decimal) -> int:
 
 # --- 3. 줄 검산 ---
 
-def _line_checks(table) -> list[Check]:
+def _line_checks(table, columns) -> list[Check]:
     checks = []
     for n, row in enumerate(table or [], 1):
         item = f"{n}줄 금액"
-        quantity, price, amount = (_decimal(row.get(k)) for k in LINE_COLUMNS)
+        quantity, price, amount = (_decimal(row.get(k)) for k in (columns.quantity, columns.price, columns.amount))
         if quantity is None or price is None or amount is None:
-            checks.append(Check(item, "", _show(row.get("금액")), None))
+            checks.append(Check(item, "", _show(row.get(columns.amount)), None))
             continue
         product = quantity * price
         checks.append(Check(item, f"{_show(quantity)} x {_show(price)} = {_show(product)}",
@@ -195,7 +212,7 @@ def _total_checks(result) -> list[Check]:
     if spec is None:
         return []
     fields = result.fields
-    item_sum = _item_sum(result.table)
+    item_sum = _item_sum(result.table, spec.amount)
     checks = []
 
     subtotal = None
@@ -220,8 +237,8 @@ def _zero_if_none(value) -> Decimal:
     return Decimal(0) if value is None else value
 
 
-def _item_sum(table) -> Decimal | None:
-    amounts = [_decimal(row.get("금액")) for row in table or []]
+def _item_sum(table, column) -> Decimal | None:
+    amounts = [_decimal(row.get(column)) for row in table or []]
     if not amounts or any(a is None for a in amounts):
         return None
     return sum(amounts, Decimal(0))
@@ -236,7 +253,7 @@ def _equal(item, expected, source_text, stated) -> Check:
 # --- 공통 ---
 
 def _decimal(value) -> Decimal | None:
-    """숫자로 볼 수 있는 값을 Decimal 로. float 은 repr 그대로(12.3 → 12.3). 못 바꾸면 None."""
+    """숫자로 볼 수 있는 값을 Decimal 로. float(엑셀 칸)은 엑셀처럼 유효 15자리. 못 바꾸면 None."""
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -245,7 +262,7 @@ def _decimal(value) -> Decimal | None:
         elif isinstance(value, int):
             number = Decimal(value)
         elif isinstance(value, float):
-            number = Decimal(repr(value))
+            return excel_number(value)
         elif isinstance(value, str) and value.strip():
             number = Decimal(value.replace(",", "").replace("$", "").strip())
         else:

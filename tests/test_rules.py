@@ -124,6 +124,55 @@ def test_check_spec_extras_need_total(tmp_path):
         load_rules(path)
 
 
+@pytest.mark.parametrize("check", [{}, {"소계": None}, {"부대비용": []}, {"합계": ""}])
+def test_empty_check_spec_is_rule_error(tmp_path, check):
+    path = _broken(tmp_path, lambda d: d.update(검산=check))
+    with pytest.raises(RuleError, match="검산에 적은 것이 없습니다"):
+        load_rules(path)
+
+
+def test_example_check_columns_default():
+    spec = load_rules(EXAMPLE).get("Invoice").check
+    assert (spec.quantity, spec.price, spec.amount) == ("수량", "단가", "금액")
+
+
+def _renamed_table(d):
+    """Invoice 표 열 이름을 영어로 바꾼다."""
+    d["표"].update(열=["줄", "품번", "품명", "Qty", "Price", "Amount"], 금액열=["Price", "Amount"], 수량열=["Qty"])
+
+
+def test_check_columns_can_be_named(tmp_path):
+    def change(d):
+        _renamed_table(d)
+        d["검산"].update(수량열="Qty", 단가열="Price", 금액열="Amount")
+    spec = load_rules(_broken(tmp_path, change)).get("Invoice").check
+    assert (spec.quantity, spec.price, spec.amount) == ("Qty", "Price", "Amount")
+    assert spec.subtotal == "소계" and spec.total == "합계금액"
+
+
+def test_default_check_column_missing_from_table_is_rule_error(tmp_path):
+    path = _broken(tmp_path, _renamed_table)  # 검산 열을 안 적으면 기본 '수량' 을 찾는다
+    with pytest.raises(RuleError, match="수량열 '수량'"):
+        load_rules(path)
+
+
+def test_named_check_column_missing_from_table_is_rule_error(tmp_path):
+    path = _broken(tmp_path, lambda d: d["검산"].update(단가열="Price"))
+    with pytest.raises(RuleError, match="단가열 'Price'"):
+        load_rules(path)
+
+
+def test_check_column_missing_from_excel_items_is_rule_error(tmp_path):
+    data = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    data["문서종류"]["PO"]["검산"] = {"합계": "합계금액"}
+    data["엑셀양식"]["HANIL"]["품목"]["열"] = {"줄": "A", "품번": "B", "품명": "C", "수량": "D", "Price": "F", "금액": "G"}
+    data["엑셀양식"]["HANIL"]["품목"]["금액열"] = ["Price", "금액"]
+    path = tmp_path / "규칙.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(RuleError, match="HANIL.*단가열 '단가'"):
+        load_rules(path)
+
+
 def test_check_spec_single_extra_may_be_text(tmp_path):
     path = _broken(tmp_path, lambda d: d["검산"].update(부대비용="운임"))
     assert load_rules(path).get("Invoice").check.extras == ["운임"]

@@ -7,10 +7,16 @@ import openpyxl
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font
 
+from app.excel_extract import excel_number
 from app.ledger import AMOUNT_FORMAT, DATE_FORMAT, DATETIME_FORMAT, fit_columns
 from app.organize import free_name, render_text
 
 LINE_STEP = 10  # 줄번호: 10, 20, 30 …
+
+
+def _number(value) -> Decimal:
+    """엑셀 칸에서 온 float 은 엑셀처럼 유효 15자리로(0.30000000000000004 → 0.3)."""
+    return excel_number(value) if isinstance(value, float) else Decimal(str(value))
 
 
 def _value(source, result, item, master_row, index):
@@ -20,7 +26,7 @@ def _value(source, result, item, master_row, index):
         return None
     if source == "수량x단가":
         qty, price = (item or {}).get("수량"), (item or {}).get("단가")
-        return None if qty is None or price is None else Decimal(str(qty)) * Decimal(str(price))
+        return None if qty is None or price is None else _number(qty) * _number(price)
     if source.startswith("고정:"):
         return source[len("고정:"):]
     group, _, name = source.partition(".")

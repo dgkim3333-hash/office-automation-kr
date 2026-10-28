@@ -176,6 +176,51 @@ def test_number_field_must_be_in_source_text(tmp_path, rules):
     assert _items(verify(result, pdf)) == ["메모번호"]
 
 
+@pytest.mark.parametrize("wrong", ["INV-2026-1023", "2026", "INV-2026", "10231"])
+def test_number_field_part_of_longer_token_fails(example_rules, wrong):
+    pdf = PDFS / "INV-2026-10231.pdf"
+    result = extract(pdf, example_rules)
+    result.fields["인보이스번호"] = wrong
+    assert _items(verify(result, pdf)) == ["인보이스번호"]
+
+
+def test_number_field_before_sentence_period_passes(tmp_path, rules):
+    pdf = _pdf(tmp_path / "dot.pdf", ["Memo No: M-2026-01.", "Date: 10/15/2026", "Total: $1,234.50"])
+    result = extract(pdf, rules)
+    assert result.fields["메모번호"] == "M-2026-01"
+    assert failed(verify(result, pdf)) == []
+
+
+def test_excel_number_field_must_equal_a_whole_cell(tmp_path, example_rules):
+    wb = openpyxl.Workbook()
+    wb.active["A1"], wb.active["B1"] = "PO Number:", "  PO-T-12 "
+    path = tmp_path / "po.xlsx"
+    wb.save(path)
+    result = ExtractResult(doc_type=example_rules.get("PO"), is_excel=True, fields={"고객PO번호": "PO-T-12"})
+    assert failed(verify(result, path)) == []
+    result.fields["고객PO번호"] = "PO-T-1"
+    assert _items(verify(result, path)) == ["고객PO번호"]
+
+
+def test_line_and_total_checks_use_named_columns(tmp_path):
+    data = yaml.safe_load(yaml.safe_dump(TEST_RULES, allow_unicode=True))
+    bill = data["문서종류"]["Bill"]
+    bill["표"].update(열=["줄", "품번", "Qty", "Price", "Amount"], 금액열=["Price", "Amount"], 수량열=["Qty"])
+    bill["검산"].update(수량열="Qty", 단가열="Price", 금액열="Amount")
+    path = tmp_path / "규칙.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    named = load_rules(path)
+
+    pdf = _bill(tmp_path, [("2", "50.00", "100.00")], "100.00", "15.00", "115.00")
+    checks = verify(extract(pdf, named), pdf)
+    assert failed(checks) == []
+    assert next(c for c in checks if c.item == "1줄 금액").ok is True
+    assert next(c for c in checks if c.item == "품목 합 = 소계").ok is True
+
+    pdf = _bill(tmp_path, [("2", "50.00", "100.01")], "100.01", "15.00", "115.01")
+    assert _items(verify(extract(pdf, named), pdf)) == ["1줄 금액"]
+
+
 def test_wrong_table_value_fails(tmp_path, rules):
     pdf = _bill(tmp_path, [("2", "50.00", "100.00")], "100.00", "15.00", "115.00")
     result = extract(pdf, rules)
@@ -309,3 +354,29 @@ def test_check_dataclass_shape():
     c = Check("합계금액", "1,234.50", "1234.50", True)
     assert (c.item, c.source, c.output, c.ok) == ("합계금액", "1,234.50", "1234.50", True)
     assert failed([c, Check("x", "", "", None), Check("y", "1", "2", False)]) == [Check("y", "1", "2", False)]
+
+
+def test_excel_formula_float_passes_line_check(tmp_path, example_rules):
+    wb = openpyxl.load_workbook(ORDERS / "고객오더_ACME_PO-ACME-2026-0417.xlsx")
+    ws = wb.active
+    ws["D14"], ws["F14"], ws["G14"] = 3, 0.1, 0.375  # =3*0.1 의 저장값
+    path = tmp_path / "po.xlsx"
+    wb.save(path)
+    _raw_float(path, "0.375", "0.30000000000000004")
+    checks = verify(read_excel(path, example_rules), path)
+    assert failed(checks) == []
+    line = next(c for c in checks if c.item == "1줄 금액")
+    assert line.ok is True and line.output == "0.3"
+
+
+def _raw_float(path, placeholder, raw):
+    """openpyxl 은 float 을 짧게 쓰므로, 엑셀이 저장하는 긴 값(=3*0.1 → 0.30000000000000004)을 XML 에 직접 넣는다."""
+    import zipfile
+    with zipfile.ZipFile(path) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    sheet = "xl/worksheets/sheet1.xml"
+    assert files[sheet].count(f"<v>{placeholder}</v>".encode()) == 1
+    files[sheet] = files[sheet].replace(f"<v>{placeholder}</v>".encode(), f"<v>{raw}</v>".encode())
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, data in files.items():
+            z.writestr(n, data)
