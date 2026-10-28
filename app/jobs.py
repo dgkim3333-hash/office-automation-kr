@@ -153,10 +153,13 @@ def load_job(folder: Path) -> Job:
     path = folder / JOB_FILE
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as e:
+        raise JobError(f"작업 설정을 UTF-8 로 읽지 못했습니다(메모장에서 다른 인코딩으로 저장했는지 확인): {path}") from e
     except (OSError, yaml.YAMLError) as e:
         raise JobError(f"작업 설정을 읽지 못했습니다: {path} ({e})") from e
     if not isinstance(data, dict):
         raise JobError(f"작업 설정 형식이 올바르지 않습니다: {path}")
+
     def need(key):
         if data.get(key) is None:
             raise KeyError(key)
@@ -183,17 +186,35 @@ def load_job(folder: Path) -> Job:
         raise JobError(f"작업 설정의 값이 올바르지 않습니다: {path} ({e})") from e
 
 
-def list_jobs(work) -> list[Job]:
+def _scan(work) -> tuple[list[Job], list[tuple[Path, str]]]:
+    """작업 폴더들을 읽어 (읽힌 작업, 깨진 작업) 으로 나눈다. 깨진 하나가 나머지를 막지 않는다."""
     root = _jobs_root(work)
-    if not root.is_dir():
-        return []
-    jobs = [load_job(child) for child in root.iterdir() if child.is_dir() and (child / JOB_FILE).is_file()]
-    return sorted(jobs, key=lambda j: j.number)
+    jobs: list[Job] = []
+    broken: list[tuple[Path, str]] = []
+    if root.is_dir():
+        for child in sorted(root.iterdir(), key=lambda p: p.name):
+            if not (child.is_dir() and (child / JOB_FILE).is_file()):
+                continue
+            try:
+                jobs.append(load_job(child))
+            except JobError as e:
+                broken.append((child, str(e)))
+    return sorted(jobs, key=lambda j: j.number), broken
+
+
+def list_jobs(work) -> list[Job]:
+    """읽히는 작업만 번호 순으로. 깨진 작업은 broken_jobs 로 따로 본다."""
+    return _scan(work)[0]
+
+
+def broken_jobs(work) -> list[tuple[Path, str]]:
+    """설정을 읽지 못한 작업의 (폴더, 이유)."""
+    return _scan(work)[1]
 
 
 def find_job(work, key: str) -> Job:
     key = key.strip()
-    jobs = list_jobs(work)
+    jobs, broken = _scan(work)
     if key.isdigit():
         for job in jobs:
             if job.number == int(key):
@@ -201,5 +222,9 @@ def find_job(work, key: str) -> Job:
     for job in jobs:
         if key in (job.name, job.title):
             return job
+    for folder, reason in broken:
+        m = _NUMBER_PREFIX.match(folder.name)
+        if key == folder.name or (key.isdigit() and m and int(m.group(1)) == int(key)):
+            raise JobError(f"작업 '{key}' 의 설정이 깨져 있습니다. {reason}")
     existing = ", ".join(j.name for j in jobs) or "없음"
     raise JobError(f"작업 '{key}' 을 찾지 못했습니다. 지금 있는 작업: {existing}")

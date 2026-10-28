@@ -5,6 +5,7 @@ from app.jobs import (
     JobError,
     create_job,
     find_job,
+    broken_jobs,
     list_jobs,
     load_job,
     save_job,
@@ -140,8 +141,8 @@ def test_load_job_bad_value_raises_job_error_and_names_file(dirs):
     path.write_text(path.read_text(encoding="utf-8").replace("번호: 1", "번호: abc"), encoding="utf-8")
     with pytest.raises(JobError, match="작업설정.yaml"):
         load_job(job.folder)
-    with pytest.raises(JobError, match="작업설정.yaml"):
-        list_jobs(work)
+    assert list_jobs(work) == []
+    assert "작업설정.yaml" in broken_jobs(work)[0][1]
 
 
 def test_load_job_null_path_raises_job_error(dirs):
@@ -170,3 +171,36 @@ def test_save_job_leaves_no_temp_file_and_round_trips(dirs):
     save_job(job)
     assert sorted(p.name for p in job.folder.glob("*.yaml*")) == ["작업설정.yaml"]
     assert load_job(job.folder).approvals == {"Hanil SO": 3}
+
+
+def test_one_broken_job_does_not_block_the_others(dirs):
+    work, inp, out = dirs
+    one = create_job(work, "하나", inp, out, "누적장부")
+    two = create_job(work, "둘", inp, out, "누적장부")
+    (one.folder / "작업설정.yaml").write_text("번호: abc" + chr(10), encoding="utf-8")
+    assert [j.number for j in list_jobs(work)] == [2]
+    broken = broken_jobs(work)
+    assert [f for f, _ in broken] == [one.folder]
+    assert "작업설정.yaml" in broken[0][1]
+    assert find_job(work, "2").folder == two.folder
+    assert find_job(work, "둘").folder == two.folder
+    with pytest.raises(JobError, match="작업설정.yaml"):
+        find_job(work, "1")
+    with pytest.raises(JobError, match="작업설정.yaml"):
+        find_job(work, "01_하나")
+
+
+def test_cp949_yaml_raises_job_error_with_path(dirs):
+    work, inp, out = dirs
+    job = create_job(work, "가", inp, out, "누적장부")
+    path = job.folder / "작업설정.yaml"
+    path.write_bytes(("제목: 가나다라마바사" + chr(10)).encode("cp949"))
+    with pytest.raises(JobError, match="작업설정.yaml"):
+        load_job(job.folder)
+    assert list_jobs(work) == [] and len(broken_jobs(work)) == 1
+
+
+def test_broken_jobs_empty_when_all_healthy(dirs):
+    work, inp, out = dirs
+    create_job(work, "가", inp, out, "누적장부")
+    assert broken_jobs(work) == []
