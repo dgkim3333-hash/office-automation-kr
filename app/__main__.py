@@ -4,6 +4,7 @@
   uv run python -m app --덮어쓰기      같은 번호 문서를 새 내용으로 바꿔 기록
   uv run python -m app init           작업 폴더 선택·생성 (설치.bat)
   uv run python -m app check <PDF>    추출 결과만 표로 보기 (파일 이동·장부 기록 없음)
+  uv run python -m app outlook        (선택) Outlook '자동화' 폴더 첨부 → 받은문서 (수집.bat)
 """
 import argparse
 import sys
@@ -16,6 +17,7 @@ from app.extract import ExtractResult, extract
 from app.init import InitError, init
 from app.ledger import Ledger, LedgerLocked
 from app.log import append_log, summary
+from app.outlook import collect_from_outlook
 from app.organize import free_name, move_duplicate, move_review, move_success, render_filename, target_path
 from app.rules import RuleError, load_rules
 
@@ -122,7 +124,8 @@ def _move(item, work):
 
 def _parser():
     p = argparse.ArgumentParser(prog="python -m app", description="PDF → 엑셀 장부 사무 자동화")
-    p.add_argument("command", nargs="?", choices=["init", "check"], help="init 또는 check (없으면 받은문서 처리)")
+    p.add_argument("command", nargs="?", choices=["init", "check", "outlook"],
+                   help="init · check · outlook (없으면 받은문서 처리)")
     p.add_argument("target", nargs="?", help="check 할 PDF 경로")
     p.add_argument("--덮어쓰기", dest="overwrite", action="store_true", help="이미 있는 문서를 새 내용으로 바꿈")
     return p
@@ -135,6 +138,9 @@ def main(argv=None, repo_root=config.REPO_ROOT) -> int:
             init(repo_root=repo_root)
             return 0
         work = config.work_dir(repo_root)
+        if args.command == "outlook":
+            collect_from_outlook(work / config.INBOX)
+            return 0
         rules = load_rules(work / config.RULES_FILE)
         if args.command == "check":
             if not args.target:
