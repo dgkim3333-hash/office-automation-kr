@@ -2,6 +2,7 @@
 
 작업 하나 = `작업/NN_제목/` 폴더 하나. 설정은 그 폴더의 `작업설정.yaml` 에 저장한다.
 """
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.organize import FORBIDDEN
 
 JOBS_DIR = "작업"
 JOB_FILE = "작업설정.yaml"
+LAST_NUMBER_FILE = "마지막번호.txt"
 RULES_FILE = "규칙.yaml"
 OUTPUT_MODES = ("회사양식", "누적장부", "둘다")
 JOB_SUBFOLDERS = ("승인대기", "확인필요", "검산")
@@ -78,13 +80,25 @@ def _check_folder(path, label: str) -> Path:
 
 
 def _next_number(root: Path) -> int:
+    """지금까지 쓴 가장 큰 번호 + 1. 지운 작업의 번호는 마지막번호.txt 가 기억해 다시 쓰지 않는다."""
     numbers = []
     if root.is_dir():
         for child in root.iterdir():
             m = _NUMBER_PREFIX.match(child.name)
             if child.is_dir() and m:
                 numbers.append(int(m.group(1)))
+        try:
+            numbers.append(int((root / LAST_NUMBER_FILE).read_text(encoding="utf-8").strip()))
+        except (OSError, ValueError):
+            pass
     return max(numbers, default=0) + 1
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """같은 폴더의 임시 파일에 쓴 뒤 바꿔치기해서, 쓰다 끊겨도 기존 파일이 잘리지 않게 한다."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def create_job(work, title: str, input_dir, output_dir, output_mode: str) -> Job:
@@ -102,6 +116,7 @@ def create_job(work, title: str, input_dir, output_dir, output_mode: str) -> Job
     folder.mkdir(parents=True)
     for sub in JOB_SUBFOLDERS:
         (folder / sub).mkdir()
+    _atomic_write(root / LAST_NUMBER_FILE, str(number))
     job = Job(
         folder=folder,
         number=number,
@@ -130,7 +145,7 @@ def save_job(job: Job) -> None:
         "마지막실행": job.last_run,
     }
     text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-    (job.folder / JOB_FILE).write_text(text, encoding="utf-8")
+    _atomic_write(job.folder / JOB_FILE, text)
 
 
 def load_job(folder: Path) -> Job:
@@ -142,15 +157,20 @@ def load_job(folder: Path) -> Job:
         raise JobError(f"작업 설정을 읽지 못했습니다: {path} ({e})") from e
     if not isinstance(data, dict):
         raise JobError(f"작업 설정 형식이 올바르지 않습니다: {path}")
+    def need(key):
+        if data.get(key) is None:
+            raise KeyError(key)
+        return data[key]
+
     try:
         return Job(
             folder=folder,
-            number=int(data["번호"]),
-            title=str(data["제목"]),
-            input_dir=Path(data["입력폴더"]),
-            output_dir=Path(data["출력폴더"]),
-            output_mode=str(data["출력방식"]),
-            run_time=str(data["실행시각"]),
+            number=int(need("번호")),
+            title=str(need("제목")),
+            input_dir=Path(need("입력폴더")),
+            output_dir=Path(need("출력폴더")),
+            output_mode=str(need("출력방식")),
+            run_time=str(need("실행시각")),
             scheduler=str(data.get("스케줄러") or ""),
             paused=bool(data.get("일시중지", False)),
             approvals={str(k): int(v) for k, v in (data.get("승인") or {}).items()},
@@ -159,6 +179,8 @@ def load_job(folder: Path) -> Job:
         )
     except KeyError as e:
         raise JobError(f"작업 설정에 {e.args[0]} 항목이 없습니다: {path}") from e
+    except (ValueError, TypeError, AttributeError) as e:
+        raise JobError(f"작업 설정의 값이 올바르지 않습니다: {path} ({e})") from e
 
 
 def list_jobs(work) -> list[Job]:

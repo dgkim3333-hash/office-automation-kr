@@ -60,17 +60,15 @@ def test_title_trimmed_and_cut_to_30(dirs):
     assert dotted.folder.name == "02_보고서"
 
 
-def test_deleted_number_is_not_reused_while_higher_exists(dirs):
+def test_deleted_number_is_never_reused_even_the_highest(dirs):
     work, inp, out = dirs
     create_job(work, "하나", inp, out, "누적장부")
     two = create_job(work, "둘", inp, out, "누적장부")
-    three = create_job(work, "셋", inp, out, "누적장부")
     import shutil
 
-    shutil.rmtree(three.folder)
     shutil.rmtree(two.folder)
-    nxt = create_job(work, "넷", inp, out, "누적장부")
-    assert nxt.number == 2  # 최대 번호(1) + 1
+    nxt = create_job(work, "셋", inp, out, "누적장부")
+    assert nxt.number == 3 and nxt.run_time == "16:40"
 
 
 def test_rejects_unknown_output_mode(dirs):
@@ -133,3 +131,42 @@ def test_save_and_load_roundtrip_and_list_order(dirs):
 def test_list_jobs_empty_when_no_jobs_dir(dirs):
     work, _, _ = dirs
     assert list_jobs(work) == []
+
+
+def test_load_job_bad_value_raises_job_error_and_names_file(dirs):
+    work, inp, out = dirs
+    job = create_job(work, "가", inp, out, "누적장부")
+    path = job.folder / "작업설정.yaml"
+    path.write_text(path.read_text(encoding="utf-8").replace("번호: 1", "번호: abc"), encoding="utf-8")
+    with pytest.raises(JobError, match="작업설정.yaml"):
+        load_job(job.folder)
+    with pytest.raises(JobError, match="작업설정.yaml"):
+        list_jobs(work)
+
+
+def test_load_job_null_path_raises_job_error(dirs):
+    work, inp, out = dirs
+    job = create_job(work, "가", inp, out, "누적장부")
+    path = job.folder / "작업설정.yaml"
+    path.write_text(path.read_text(encoding="utf-8").replace(f"입력폴더: {inp}", "입력폴더:"), encoding="utf-8")
+    with pytest.raises(JobError, match="입력폴더"):
+        load_job(job.folder)
+
+
+def test_load_job_missing_key_raises_job_error(dirs):
+    work, inp, out = dirs
+    job = create_job(work, "가", inp, out, "누적장부")
+    path = job.folder / "작업설정.yaml"
+    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if not l.startswith("출력방식")]
+    path.write_text(chr(10).join(lines), encoding="utf-8")
+    with pytest.raises(JobError, match="출력방식"):
+        load_job(job.folder)
+
+
+def test_save_job_leaves_no_temp_file_and_round_trips(dirs):
+    work, inp, out = dirs
+    job = create_job(work, "가", inp, out, "둘다")
+    job.approvals = {"Hanil SO": 3}
+    save_job(job)
+    assert sorted(p.name for p in job.folder.glob("*.yaml*")) == ["작업설정.yaml"]
+    assert load_job(job.folder).approvals == {"Hanil SO": 3}
