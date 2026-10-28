@@ -216,10 +216,15 @@ def env(tmp_path, capsys):
     return repo, work.resolve(), inp, out
 
 
-def _new(repo, inp, out, title=TITLE):
+def _new(repo, inp, out, title=TITLE, resume=True):
+    """job new(멈춤으로 만들어짐) 뒤, 작업지시서처럼 규칙을 채웠다고 보고 job resume."""
     assert main(["job", "new", "--제목", title, "--입력", str(inp), "--출력", str(out), "--방식", "누적장부"],
                 repo_root=repo) == 0
-    return find_job(config.work_dir(repo), title)
+    job = find_job(config.work_dir(repo), title)
+    if resume:
+        assert main(["job", "resume", str(job.number)], repo_root=repo) == 0
+        job = load_job(job.folder)
+    return job
 
 
 def _desktop(fake_ps, tmp_path):
@@ -289,11 +294,13 @@ def test_job_delete_warns_when_unregister_fails(env, fake_ps, tmp_path, capsys):
 def test_pause_resume_disable_and_enable_task(env, fake_ps, tmp_path):
     repo, work, inp, out = env
     _desktop(fake_ps, tmp_path)
-    job = _new(repo, inp, out)
-    assert main(["job", "pause", "1"], repo_root=repo) == 0
+    job = _new(repo, inp, out, resume=False)
+    # 새 작업은 멈춤으로 만들어져 등록 직후 작업 스케줄러에서도 꺼 둔다(Ruling 26)
     assert load_job(job.folder).paused and len(fake_ps.having("Disable-ScheduledTask")) == 1
     assert main(["job", "resume", "1"], repo_root=repo) == 0
     assert not load_job(job.folder).paused and len(fake_ps.having("Enable-ScheduledTask")) == 1
+    assert main(["job", "pause", "1"], repo_root=repo) == 0
+    assert load_job(job.folder).paused and len(fake_ps.having("Disable-ScheduledTask")) == 2
 
 
 def test_pause_without_task_scheduler_does_not_call_it(env, capsys):

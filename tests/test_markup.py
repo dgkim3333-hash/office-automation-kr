@@ -407,12 +407,41 @@ def test_check_command_shows_markup_per_line(env, capsys):
 
     check(po, rules, work, job)
     out_text = capsys.readouterr().out
-    assert "B-77" in out_text and "마크업표" in out_text
+    assert "| 1줄 (A) | 마크업표에 있음 |" in out_text and "| 2줄 (B-77) | 마크업표에 없음 |" in out_text
+    assert "마크업표에 없는 파트넘버: B-77" in out_text
 
     _markup(work / MARKUP_FILE, [["A", 3, None], ["B-77", 2, 2]])
     check(po, rules, work, job)
     out_text = capsys.readouterr().out
-    assert "| 1줄 본사 단가 |" in out_text and "| 2줄 마크업% (B-77) | 마크업표 2% |" in out_text
+    assert "| 1줄 (A) | 일치 |" in out_text and "| 2줄 (B-77) | 일치 |" in out_text
+    # 마크업% · 본사 단가 · 본사 금액 값은 보이지 않는다(Ruling 25)
+    for secret in ("0.103", "1.03", "3%", "2%", "(100 + "):
+        assert secret not in out_text, secret
+
+
+def test_check_command_markup_mismatch_shows_status_only(env, capsys, monkeypatch):
+    from app import __main__ as cli
+    work, inp, out, job = env
+    _markup(work / MARKUP_FILE, [["A", 3, None]])
+    po = _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10")])
+    real = cli.written_markup
+    monkeypatch.setattr(cli, "written_markup", lambda form, rows: [
+        {**r, "마크업.단가": Decimal("0.2")} for r in real(form, rows)])
+    cli.check(po, load_rules(job.rules_path), work, job)
+    out_text = capsys.readouterr().out
+    assert "| 1줄 (A) | 불일치 |" in out_text and "마크업 검산 불일치 1건" in out_text
+    assert "0.2" not in out_text and "0.103" not in out_text
+
+
+def test_check_command_hides_markup_file_error_details(env, capsys):
+    from app.__main__ import check
+    work, inp, out, job = env
+    _markup(work / MARKUP_FILE, [["SECRET-PART", 30, None]])  # 잘못된 줄: 오류 글자에 파트 · 마크업% 가 들어간다
+    po = _po(inp / "po1.xlsx", "PO-1", [("A", 10, "0.10")])
+    check(po, load_rules(job.rules_path), work, job)
+    out_text = capsys.readouterr().out
+    assert "마크업표" in out_text and "직접" in out_text
+    assert "SECRET-PART" not in out_text and "30" not in out_text
 
 
 # --- 수정 1차(Ruling 22 · 23, 리뷰 Minor) ---

@@ -820,3 +820,41 @@ def test_one_document_error_does_not_stop_others(env, monkeypatch):
     assert "흉내: 기록 실패" in (job.folder / "확인필요" / "DM-2026-0092.pdf.txt").read_text(encoding="utf-8")
     assert [r["인보이스번호"] for r in _rows(out / LEDGER, "Invoice")] == ["INV-2026-10231"]
     assert _rows(out / LEDGER, "DM") == []
+
+
+# --- 수정(Ruling 28): 고객마스터에 줄을 더하면 같은 날 다시 처리 ---
+
+def _master(work, rows):
+    wb = openpyxl.Workbook()
+    wb.active.append(["고객명", "고객코드", "결제조건"])
+    for row in rows:
+        wb.active.append(list(row))
+    wb.save(work / "고객마스터.xlsx")
+
+
+def test_adding_customer_to_master_retries_same_day(env, tmp_path):
+    work, inp, out = env
+    _master(work, [["Someone Else", "C-KR-0009", "Net 30"]])
+    job = _job(work, inp, out, mode="회사양식", rules_text=PDF_PO_RULES)
+    _drop(_fixtures(tmp_path) / "ACME_PO_PO-77001.pdf", inp)
+
+    first = run_job(job, work)
+    assert first.counts["확인필요"] == 1
+    note = next((job.folder / "확인필요").glob("*.txt")).read_text(encoding="utf-8")
+    assert "고객마스터.xlsx 에 줄을 더한 뒤 지금 실행을 누르면 다시 처리합니다" in note
+    assert run_job(job, work).counts["확인필요"] == 0  # 같은 날 · 그대로면 다시 시도하지 않는다
+
+    _master(work, [["Someone Else", "C-KR-0009", "Net 30"], ["ACME Semiconductor Korea", "C-KR-0001", "Net 30"]])
+    report = run_job(job, work)
+
+    assert report.counts["성공"] == 1, report.message
+    assert (out / "회사양식_SO입력_PO-77001.xlsx").exists()
+    assert [r["상태"] for r in load_records(job)] == ["확인필요", "성공"]
+
+
+def test_master_not_mixed_when_company_form_does_not_use_it(env):
+    work, inp, out = env
+    job = _job(work, inp, out, mode="누적장부", rules_text=_only("Invoice"))
+    _drop(INV, inp)
+    run_job(job, work)
+    assert load_records(job)[0]["규칙지문"] == rules_fingerprint(job)

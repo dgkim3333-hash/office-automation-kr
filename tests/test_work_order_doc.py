@@ -20,6 +20,7 @@ QUESTIONS = [
     'pick-folder "출력 폴더를 고르세요"',
     "job new",
     "--작업",
+    "job resume",
     "처음 10건은 승인대기로 갑니다.",
     "다음 작업도 만드실까요, 그만하실까요?",
 ]
@@ -130,5 +131,25 @@ def test_install_script_points_to_job_chapter_and_removes_old_files():
     assert "04장(작업 만들기)" in text
     legacy = text[text.index("$LegacyFiles"):]
     legacy = legacy[:legacy.index(")")]
-    for name in ("04_처음_처리하기.md", "수집.bat"):
+    for name in ("04_처음_처리하기.md", "수집.bat", "체험.bat"):
         assert f"'{name}'" in legacy, name
+
+
+def test_folder_and_mode_changes_use_job_set_not_hand_edits():
+    """작업설정.yaml 을 손으로 고치지 않고 job set 을 쓴다(Ruling 27)."""
+    claude = _text(CLAUDE_MD)
+    assert "job set" in claude and "job set" in _text(WORK_ORDER)
+    assert "`입력폴더`" not in claude and "작업설정.yaml` 을 `.bak`" not in claude
+
+
+def test_docs_say_check_hides_company_data():
+    """check 에는 예시 파일의 값과 일치 여부만 나오고 고객마스터 · 마크업표 값은 나오지 않는다(Ruling 25)."""
+    for path in (REPO / "01_구조_이해.md", REPO / "04_작업_만들기.md", WORK_ORDER):
+        text = _text(path)
+        assert "일치 여부" in text, path.name
+    assert "C-KR-0417)" not in _text(REPO / "05_내_양식_가르치기.md")
+
+
+def test_chapter_06_master_same_day_retry():
+    text = _text(REPO / "06_매일_쓰기.md")
+    assert "| 확인필요(고객마스터에 없는 고객) |" in text and "같은 날 다시 처리" in text

@@ -2,8 +2,10 @@
 
   uv run python -m app                            작업 목록과 쓰는 법 안내(아무것도 처리하지 않음)
   uv run python -m app init [경로]                작업 폴더 만들기(설치.bat). 경로를 주면 묻지 않음
-  uv run python -m app job new --제목 T --입력 DIR --출력 DIR --방식 회사양식|누적장부|둘다
-  uv run python -m app job list                   작업 목록(시각 · 실행 방법 · 승인 현황)
+  uv run python -m app job new --제목 T --입력 DIR --출력 DIR --방식 회사양식|누적장부|둘다   (멈춤으로 만듦)
+  uv run python -m app job set N [--입력 DIR] [--출력 DIR] [--방식 …]   입력 · 출력 폴더 · 출력 방식 바꾸기
+  uv run python -m app job list                   작업 목록(시각 · 실행 방법 · 승인 현황 · 멈춤)
+  (check 는 Claude 도 보는 화면이라 고객마스터 · 마크업표의 값은 보여 주지 않는다. 찾음 · 일치 여부만)
   uv run python -m app job delete|pause|resume N  작업 지우기 · 멈추기 · 다시 시작(매일 실행 · 바로가기도 같이 정리)
   uv run python -m app job repair                 모든 작업의 매일 실행 · 바탕화면 바로가기 다시 만들기
   uv run python -m app run N [--자동]             작업 실행(바탕화면 「지금 실행」, 매일 자동 실행은 --자동)
@@ -29,9 +31,11 @@ from app.extract import extract
 from app.init import InitError, init
 from app.job_run import COMPANY_MODES, LEDGER_MODES, MASTER_PREFIX, JobLocked, job_lock, ledger_path, reload_job, run_job
 from app.notify import notify_failure, notify_report
-from app.jobs import JOBS_DIR, JobError, broken_jobs, create_job, find_job, list_jobs, save_job
+from app.jobs import JOBS_DIR, JobError, broken_jobs, checked_settings, create_job, find_job, list_jobs, save_job
 from app.local_guard import BANNER, LocalOnlyError, block_network, check_environment, check_work_dir
-from app.markup import MARKUP_FILE, MarkupError, load_markup, markup_checks, missing_reason, written_markup
+from app.markup import (
+    MARKUP_FILE, MarkupError, line_statuses, load_markup, markup_checks, missing_reason, written_markup,
+)
 from app.master import MasterError, load_master, lookup
 from app.organize import free_name
 from app.outlook import collect_from_outlook
@@ -60,12 +64,17 @@ def _parser():
     s.add_argument("target", nargs="?", help="작업 폴더 경로(없으면 고르기 창)")
 
     job = sub.add_parser("job", help="작업 만들기 · 목록 · 지우기 · 멈추기")
-    jobs = job.add_subparsers(dest="job_command", metavar="new|list|delete|pause|resume|repair", required=True)
-    new = jobs.add_parser("new", help="작업 만들기")
+    jobs = job.add_subparsers(dest="job_command", metavar="new|set|list|delete|pause|resume|repair", required=True)
+    new = jobs.add_parser("new", help="작업 만들기(멈춤으로 만듦. 규칙을 채운 뒤 job resume)")
     new.add_argument("--제목", dest="title", required=True)
     new.add_argument("--입력", dest="input", required=True, help="입력 폴더")
     new.add_argument("--출력", dest="output", required=True, help="출력 폴더")
     new.add_argument("--방식", dest="mode", required=True, help="회사양식 · 누적장부 · 둘다")
+    change = jobs.add_parser("set", help="작업의 입력 폴더 · 출력 폴더 · 출력 방식 바꾸기")
+    change.add_argument("job", help="작업 번호 또는 이름")
+    change.add_argument("--입력", dest="input", help="새 입력 폴더")
+    change.add_argument("--출력", dest="output", help="새 출력 폴더")
+    change.add_argument("--방식", dest="mode", help="회사양식 · 누적장부 · 둘다")
     jobs.add_parser("list", help="작업 목록")
     jobs.add_parser("repair", help="모든 작업의 매일 실행 · 바탕화면 바로가기 다시 만들기")
     for name, text in (("delete", "작업 지우기"), ("pause", "매일 실행 멈추기"), ("resume", "매일 실행 다시 시작")):
@@ -164,7 +173,7 @@ def _print_jobs(work) -> int:
     for job in jobs:
         line = (f"{job.name}  매일 {job.run_time}  실행 방법: {job.scheduler or '등록 안 됨'}  "
                 f"승인: {_approval_text(job)}")
-        print(line + ("  (일시중지)" if job.paused else ""))
+        print(line + (f"  멈춤(자동 실행 꺼짐. 켜려면 job resume {job.number:02d})" if job.paused else ""))
     for folder, reason in broken:
         print(f"{folder.name}  설정이 깨져 실행할 수 없음: {reason}")
     return len(jobs) + len(broken)
@@ -191,6 +200,8 @@ def _job(args, work, repo_root) -> int:
         return _job_repair(work, repo_root)
     if args.job_command == "delete":
         return _job_delete(work, args.job)
+    if args.job_command == "set":
+        return _job_set(work, args)
     return _set_paused(work, args.job, args.job_command == "pause")
 
 
@@ -199,7 +210,8 @@ def _abs(path) -> Path:
 
 
 def _job_new(work, repo_root, args) -> int:
-    job = create_job(work, args.title, _abs(args.input), _abs(args.output), args.mode)
+    # 멈춤으로 만든다: 규칙을 채우는 대화 중에 매일 실행(또는 놓친 실행)이 빈 규칙으로 돌지 않게(Ruling 26)
+    job = create_job(work, args.title, _abs(args.input), _abs(args.output), args.mode, paused=True)
     print(f"작업 폴더: {job.folder}")
     print(f"입력 폴더: {job.input_dir}")
     print(f"출력 폴더: {job.output_dir}")
@@ -212,7 +224,46 @@ def _job_new(work, repo_root, args) -> int:
         print(f"경고: 규칙 뼈대를 넣지 못함 ({e}). {job.rules_path} 를 새로 만들어 채우세요.")
     print(f"작업 만듦: {job.name} (매일 {job.run_time})")
     _install_automation(job, repo_root)
+    print(f"지금은 멈춤입니다. 규칙을 다 채우고 check 가 통과하면 job resume {job.number:02d} 으로 자동 실행을 켭니다.")
     return 0
+
+
+def _job_set(work, args) -> int:
+    """입력 폴더 · 출력 폴더 · 출력 방식 바꾸기. 실행 중이면 바꾸지 않는다(JobLocked)."""
+    job = find_job(work, args.job)
+    with job_lock(job):  # 실행이 끝날 때 작업설정.yaml 을 저장하므로 겹치지 않게
+        reload_job(job)
+        new_in, new_out, mode = checked_settings(
+            job,
+            _abs(args.input) if args.input else None,
+            _abs(args.output) if args.output else None,
+            args.mode,
+        )
+        old_out, old_mode = job.output_dir, job.output_mode
+        old_ledger = ledger_path(job)
+        job.input_dir, job.output_dir, job.output_mode = new_in, new_out, mode
+        save_job(job)
+    print(f"{job.name}: 설정을 바꿨습니다.")
+    print(f"입력 폴더: {job.input_dir}")
+    print(f"출력 폴더: {job.output_dir}")
+    print(f"출력 방식: {job.output_mode}")
+    if not _same_path(old_out, new_out) and old_ledger.is_file():
+        print(f"예전 출력 폴더의 {old_ledger.name} 를 새 폴더로 직접 옮기세요: {old_ledger}")
+    if mode in COMPANY_MODES and old_mode != mode and not _has_company_rule(job):
+        print("규칙.yaml 에 회사양식이 없습니다. 회사 양식을 가르쳐야 실행됩니다"
+              "(작업지시서 3번: 회사 양식 파일을 받아 「회사양식」 규칙을 채운 뒤 check).")
+    return 0
+
+
+def _same_path(a, b) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def _has_company_rule(job) -> bool:
+    try:
+        return load_rules(job.rules_path).company_form is not None
+    except (RuleError, OSError, UnicodeDecodeError):
+        return False
 
 
 # --- 매일 실행 등록 · 바탕화면 바로가기 ---
@@ -576,7 +627,7 @@ def _check_company_form(result, rules, work):
         except MasterError as e:
             print(f"고객마스터: {e}")
         if row is not None:
-            print(f"고객마스터: 찾음 (고객코드 {row.get('고객코드')})")
+            print("고객마스터: 찾음")  # 고객코드 등 값은 회사 정보라 보여 주지 않는다(Claude 도 보는 화면, Ruling 25)
         else:
             print(f"고객마스터: 없음 ('{customer}' 줄을 고객마스터.xlsx 에 더해야 회사 양식이 만들어집니다)")
     if form.uses_markup:
@@ -585,25 +636,33 @@ def _check_company_form(result, rules, work):
 
 
 def _check_markup(result, form, master_row, work):
-    """마크업표: 빠진 파트가 있는지, 줄마다 마크업% · 본사 단가 · 본사 금액(실행 때와 같은 계산 · 검산)."""
+    """마크업: 줄마다 파트넘버와 일치 · 불일치 · 마크업표에 없음만(실행 때와 같은 계산 · 검산).
+    마크업% · 본사 단가 · 본사 금액 값과 마크업표 오류 내용은 회사 정보라 보여 주지 않는다(Claude 도 보는 화면,
+    Ruling 25). 실제 실행의 검산 파일 · 대조표에는 친구가 볼 수 있게 값이 다 들어간다."""
+    path = Path(work) / MARKUP_FILE if work else None
+    if path is None or not path.is_file():
+        print(f"\n마크업표: {MARKUP_FILE} 가 작업 폴더에 없습니다. 만들어 파트넘버 · 마크업% 를 직접 채우세요(05장 5절).")
+        print("이대로 실행하면 이 문서는 확인필요로 갑니다.")
+        return
     try:
-        if not work:
-            raise MarkupError(f"작업 폴더를 몰라 {MARKUP_FILE} 를 읽지 못했습니다")
-        table = load_markup(Path(work) / MARKUP_FILE)
-    except MarkupError as e:
-        print(f"\n마크업표: {e}")
+        table = load_markup(path)
+    except MarkupError:
+        print(f"\n마크업표: {MARKUP_FILE} 를 열 수 없거나 고칠 줄이 있습니다. 회사 정보라 내용은 여기서 보여 주지 않습니다. "
+              f"{MARKUP_FILE} 를 직접 열어 확인하세요(05장 5절). 지금 실행 뒤 확인필요 사유(.txt)에도 적힙니다.")
         print("이대로 실행하면 이 문서는 확인필요로 갑니다.")
         return
     missing = missing_reason(result, form, table)
+    checks = None
+    if not missing:
+        _, rows = company_rows(result, master_row, form, table)
+        checks = markup_checks(result, written_markup(form, rows), table, form.markup)
+    print("\n| 마크업 | 결과 |\n|---|---|")
+    for label, status in line_statuses(result, form.markup, table, checks):
+        print(f"| {_cell(label)} | {status} |")
     if missing:
         print(f"\n마크업표: {missing}")
         print("이대로 실행하면 이 문서는 확인필요로 갑니다(회사 양식을 만들지 않음).")
         return
-    _, rows = company_rows(result, master_row, form, table)
-    checks = markup_checks(result, written_markup(form, rows), table, form.markup)
-    print("\n| 마크업 검산 | 계산 | 결과 | 일치 |\n|---|---|---|---|")
-    for c in checks:
-        print(f"| {_cell(c.item)} | {_cell(c.source)} | {_cell(c.output)} | {_mark(c.ok)} |")
     bad = len(failed(checks))
     if bad:
         print(f"\n확인필요: 마크업 검산 불일치 {bad}건. 이대로 실행하면 이 문서는 확인필요로 갑니다.")

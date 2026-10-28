@@ -38,12 +38,16 @@ def env(tmp_path, capsys):
     return repo, work.resolve(), inp, out
 
 
-def _new(repo, inp, out, title=TITLE, mode="누적장부", rules=EXAMPLE_RULES):
+def _new(repo, inp, out, title=TITLE, mode="누적장부", rules=EXAMPLE_RULES, resume=True):
+    """작업지시서 흐름 그대로: job new(멈춤으로 만들어짐) → 규칙 채우기 → job resume."""
     assert main(["job", "new", "--제목", title, "--입력", str(inp), "--출력", str(out), "--방식", mode],
                 repo_root=repo) == 0
     job = find_job(config.work_dir(repo), title)
     if rules is not None:
         shutil.copy(rules, job.rules_path)
+    if resume:
+        assert main(["job", "resume", str(job.number)], repo_root=repo) == 0
+        job = load_job(job.folder)
     return job
 
 
@@ -249,7 +253,7 @@ def test_check_excel_po_shows_master_and_company_form(env, capsys):
     assert main(["check", str(ACME_PO), "--작업", "1"], repo_root=repo) == 0
     shown = capsys.readouterr().out
     assert "엑셀양식: ACME" in shown
-    assert "고객마스터: 찾음 (고객코드 C-KR-0417)" in shown
+    assert "고객마스터: 찾음" in shown and "C-KR-0417" not in shown
     assert "회사 양식: 회사양식_SO입력_PO-ACME-2026-0417.xlsx (4줄)" in shown
 
 
@@ -368,3 +372,96 @@ def test_skeleton_rules_is_commented_guide_not_empty_doc_types():
     assert sum(1 for line in text.splitlines() if line.lstrip().startswith("#")) >= 10
     with pytest.raises(RuleError):
         load_rules(SKELETON)
+
+
+# --- 수정(Ruling 26): 새 작업은 멈춤으로 만든다 ---
+
+def test_job_new_creates_paused_job_until_resume(env, capsys):
+    repo, work, inp, out = env
+    job = _new(repo, inp, out, resume=False)
+    shown = capsys.readouterr().out
+    assert load_job(job.folder).paused is True
+    assert f"job resume {job.number:02d}" in shown and "멈춤" in shown
+
+    assert main(["job", "list"], repo_root=repo) == 0
+    listed = capsys.readouterr().out
+    assert "멈춤" in listed and f"job resume {job.number:02d}" in listed
+
+    assert main(["run", "1", "--자동"], repo_root=repo) == 0  # 규칙을 채우는 중에 자동 실행이 돌아도 건너뜀
+    assert load_records(job) == []
+
+    assert main(["job", "resume", "1"], repo_root=repo) == 0
+    assert load_job(job.folder).paused is False
+    capsys.readouterr()
+    main(["job", "list"], repo_root=repo)
+    assert "멈춤" not in capsys.readouterr().out
+
+
+# --- 수정(Ruling 27): job set ---
+
+def test_job_set_changes_input_output_and_mode(env, tmp_path, capsys):
+    repo, work, inp, out = env
+    job = _new(repo, inp, out)
+    new_in, new_out = tmp_path / "새입력", tmp_path / "새출력"
+    new_in.mkdir()
+    new_out.mkdir()
+    capsys.readouterr()
+    assert main(["job", "set", "1", "--입력", str(new_in), "--출력", str(new_out)], repo_root=repo) == 0
+    saved = load_job(job.folder)
+    assert saved.input_dir.resolve() == new_in.resolve() and saved.output_dir.resolve() == new_out.resolve()
+    assert saved.output_mode == "누적장부" and saved.paused is False and saved.number == 1
+    shown = capsys.readouterr().out
+    assert str(saved.input_dir) in shown and str(saved.output_dir) in shown
+
+
+def test_job_set_output_change_says_move_ledger(env, tmp_path, capsys):
+    repo, work, inp, out = env
+    job = _new(repo, inp, out)
+    (out / f"누적장부_{TITLE}.xlsx").write_bytes(b"ledger")
+    new_out = tmp_path / "새출력"
+    new_out.mkdir()
+    capsys.readouterr()
+    assert main(["job", "set", "1", "--출력", str(new_out)], repo_root=repo) == 0
+    shown = capsys.readouterr().out
+    assert f"예전 출력 폴더의 누적장부_{TITLE}.xlsx 를 새 폴더로 직접 옮기세요" in shown
+    assert (out / f"누적장부_{TITLE}.xlsx").exists()  # 프로그램이 옮기지는 않는다
+
+
+def test_job_set_mode_to_company_without_company_rule_says_teach_it(env, capsys):
+    repo, work, inp, out = env
+    job = _new(repo, inp, out, rules=None)
+    job.rules_path.write_text(yaml.safe_dump({"문서종류": yaml.safe_load(EXAMPLE_RULES.read_text(encoding="utf-8"))
+                                              ["문서종류"]}, allow_unicode=True), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["job", "set", "1", "--방식", "둘다"], repo_root=repo) == 0
+    shown = capsys.readouterr().out
+    assert load_job(job.folder).output_mode == "둘다"
+    assert "회사양식" in shown and "작업지시서" in shown
+
+
+@pytest.mark.parametrize("args, said", [
+    (["--방식", "엉뚱"], "출력 방식"),
+    (["--입력", "OUT"], "서로 다른 폴더"),
+    (["--출력", "MISSING"], "폴더가 없습니다"),
+    ([], "바꿀 것"),
+])
+def test_job_set_rejects_bad_values_and_saves_nothing(env, tmp_path, capsys, args, said):
+    repo, work, inp, out = env
+    job = _new(repo, inp, out)
+    before = (job.folder / "작업설정.yaml").read_bytes()
+    args = [{"OUT": str(out), "MISSING": str(tmp_path / "없는폴더")}.get(a, a) for a in args]
+    capsys.readouterr()
+    assert main(["job", "set", "1", *args], repo_root=repo) != 0
+    assert said in capsys.readouterr().out
+    assert (job.folder / "작업설정.yaml").read_bytes() == before
+
+
+def test_job_set_while_running_is_refused(env, tmp_path, capsys):
+    repo, work, inp, out = env
+    job = _new(repo, inp, out)
+    other = tmp_path / "다른입력"
+    other.mkdir()
+    with job_lock(job):
+        assert main(["job", "set", "1", "--입력", str(other)], repo_root=repo) != 0
+    assert "실행 중" in capsys.readouterr().out
+    assert load_job(job.folder).input_dir.resolve() == inp.resolve()

@@ -1,4 +1,5 @@
 """고객마스터.xlsx: 고객명 → 고객코드·결제조건·기본 인도조건. 회사 정보라 사용자가 직접 채운다."""
+import io
 from pathlib import Path
 
 import openpyxl
@@ -26,8 +27,22 @@ def load_master(path) -> dict[str, dict]:
     path = Path(path)
     if not path.exists():
         raise MasterError(f"고객마스터.xlsx 가 없습니다: {path}")
-    ws = openpyxl.load_workbook(path, data_only=True).worksheets[0]
+    return _master_from(path)
+
+
+def master_from_bytes(data: bytes) -> dict[str, dict]:
+    """한 번 읽은 파일 바이트에서 고객마스터를 만든다(실행 중 파일이 바뀌어도 지문과 같은 내용을 쓰게)."""
+    return _master_from(io.BytesIO(data))
+
+
+def _master_from(source) -> dict[str, dict]:
+    try:
+        wb = openpyxl.load_workbook(source, data_only=True)
+    except Exception as e:
+        raise MasterError(f"고객마스터.xlsx 를 열지 못했습니다(엑셀 통합 문서 .xlsx 인지 확인): {e}") from None
+    ws = wb.worksheets[0]
     rows = list(ws.iter_rows(values_only=True))
+    wb.close()
     header = [str(h).strip() if h is not None else "" for h in (rows[0] if rows else [])]
     if NAME_COLUMN not in header:
         raise MasterError(f"고객마스터.xlsx 첫 줄에 '{NAME_COLUMN}' 열이 있어야 합니다.")

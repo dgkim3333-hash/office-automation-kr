@@ -349,6 +349,28 @@ def markup_checks(result, rows_written, table, columns: MarkupColumns | None = N
     return checks
 
 
+MISSING_STATUS = "마크업표에 없음"
+FOUND_STATUS = "마크업표에 있음"
+
+
+def line_statuses(result, columns: MarkupColumns, table, checks: list[Check] | None = None) -> list[tuple[str, str]]:
+    """check 화면용 줄별 결과: (「n줄 (파트넘버)」, 일치 · 불일치 · 마크업표에 없음). 마크업% · 본사 단가 값은 넣지 않는다
+    (check 는 Claude 도 보는 화면이라 회사 정보인 마크업표 값을 보여 주지 않는다, Ruling 25).
+    checks 가 없으면(빠진 파트가 있어 계산하지 않음) 있는 파트는 「마크업표에 있음」."""
+    lines = []
+    for n, item in enumerate(result.table or [], 1):
+        label = f"{n}줄 ({_label((item or {}).get(columns.part))})"
+        if lookup_row(item, columns, table) is None:
+            status = MISSING_STATUS
+        elif checks is None:
+            status = FOUND_STATUS
+        else:
+            mine = [c for c in checks if c.item.startswith(f"{n}줄 ")]
+            status = "일치" if mine and all(c.ok for c in mine) else "불일치"
+        lines.append((label, status))
+    return lines
+
+
 def markup_stamp(result, form, table) -> str:
     """이 문서가 쓰는 마크업표 줄들의 지문. 승인대기 대조표에 남겨, 친구가 본 뒤 그 파트의 마크업이 바뀌면
     대조표를 새로 만든다(다른 파트를 더하거나 고친 것은 상관없음). 승인 수(양식 지문)에는 넣지 않는다."""

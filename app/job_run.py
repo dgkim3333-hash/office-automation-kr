@@ -27,7 +27,7 @@ from app.log import append_log
 from app.markup import (
     MARKUP_FILE, MarkupError, markup_checks, markup_from_bytes, markup_stamp, missing_reason, written_markup,
 )
-from app.master import MasterError, load_master, lookup
+from app.master import MasterError, lookup, master_from_bytes
 from app.organize import free_name
 from app.outputs import (
     _same_value, _text, company_form_name, company_rows, company_workbook, read_back, write_check_file,
@@ -394,6 +394,9 @@ class _Run:
         self.ledger_locked = False
         self.ledger_held = 0  # 누적장부가 열려 있어 보류한 파일 수
         self.master = None
+        self.master_used = False             # 회사 양식이 고객마스터.* 열을 쓰고 이번 실행이 회사 양식을 만든다
+        self.master_bytes: bytes | None = None  # 실행 시작 때 한 번 읽은 고객마스터.xlsx(없거나 못 읽으면 None)
+        self.master_read_error = ""
         # 승인 실행(승인대기\ 를 읽음)이면 승인대기 기록을 건너뛰지 않는다
         self.approving = _same_dir(source, Path(job.folder) / WAITING)
         self.waiting_fps: set[str] = set()  # 승인대기에 있는 복사본들의 지문
@@ -448,9 +451,18 @@ class _Run:
             return self._stop(
                 f"출력 방식이 '{self.job.output_mode}' 인데 규칙.yaml 에 회사양식이 없습니다. "
                 f"Code 탭에서 「{self.job.title} 작업 규칙 고쳐 줘」라고 말해 회사양식을 적거나, 출력 방식을 '누적장부' 로 바꾸세요.")
-        self.markup_used = self.job.output_mode in COMPANY_MODES and self.rules.company_form.uses_markup
+        company = self.rules.company_form if self.job.output_mode in COMPANY_MODES else None
+        self.markup_used = company is not None and company.uses_markup
+        self.master_used = company is not None and any(c.source.startswith(MASTER_PREFIX) for c in company.columns)
+        # 마크업표 · 고객마스터는 데이터라 승인 수(양식 지문)에는 넣지 않고, 확인필요를 다시 시도할지 보는
+        # 규칙지문에만 섞는다. 바뀌면 같은 날이라도 확인필요 문서를 다시 시도한다(빠진 파트 · 고객 줄을 더한 뒤 바로)
+        extra = b""
         if self.markup_used:
-            self._read_markup(raw)
+            extra += b"\0markup\0" + self._read_markup()
+        if self.master_used:
+            extra += b"\0master\0" + self._read_master()
+        if extra:
+            self.rules_fp = hashlib.sha256(raw + extra).hexdigest()[:16]
         try:
             self.state = _current_state(load_records(self.job))
         except (OSError, UnicodeDecodeError, csv.Error) as e:
@@ -493,9 +505,9 @@ class _Run:
     def _candidates(self):
         return _documents(self.source)
 
-    def _read_markup(self, rules_raw: bytes):
-        """마크업표.xlsx 를 한 번 읽고, 규칙지문에 그 내용을 섞는다. 마크업표가 바뀌면 같은 날이라도 확인필요 문서를
-        다시 시도하게(빠진 파트를 더한 뒤 바로 다시 실행). 승인 수(양식 지문)에는 넣지 않는다(설계 13-2)."""
+    def _read_markup(self) -> bytes:
+        """마크업표.xlsx 를 한 번 읽고, 규칙지문에 섞을 표시를 돌려준다. 마크업표가 바뀌면 같은 날이라도 확인필요
+        문서를 다시 시도하게(빠진 파트를 더한 뒤 바로 다시 실행). 승인 수(양식 지문)에는 넣지 않는다(설계 13-2)."""
         path = self.work / MARKUP_FILE
         try:
             self.markup_bytes = path.read_bytes()
@@ -506,7 +518,20 @@ class _Run:
         except OSError as e:
             self.markup_read_error = f"{MARKUP_FILE} 를 읽지 못했습니다(엑셀에서 열려 있으면 닫으세요): {e}"
             marker = b"unreadable"
-        self.rules_fp = hashlib.sha256(rules_raw + b"\0markup\0" + marker).hexdigest()[:16]
+        return marker
+
+    def _read_master(self) -> bytes:
+        """고객마스터.xlsx 를 한 번 읽고, 규칙지문에 섞을 표시를 돌려준다(고객 줄을 더하면 같은 날 다시 시도)."""
+        path = self.work / MASTER_FILE
+        try:
+            self.master_bytes = path.read_bytes()
+            return b"file\0" + self.master_bytes
+        except FileNotFoundError:
+            self.master_read_error = f"{MASTER_FILE} 가 없습니다: {path}"
+            return b"missing"
+        except OSError as e:
+            self.master_read_error = f"{MASTER_FILE} 를 읽지 못했습니다(엑셀에서 열려 있으면 닫으세요): {e}"
+            return b"unreadable"
 
     def _markup(self):
         """이번 실행의 마크업표(처음 쓸 때 만든다). 쓸 수 없으면 MarkupError."""
@@ -624,7 +649,7 @@ class _Run:
                 return
             if master_row is None:
                 self._review(path, fp, result, (
-                    f"고객마스터에 '{customer}' 가 없습니다. 고객마스터.xlsx 에 이 고객 줄을 더한 뒤 다시 넣으세요"))
+                    f"고객마스터에 '{customer}' 가 없습니다. 고객마스터.xlsx 에 줄을 더한 뒤 지금 실행을 누르면 다시 처리합니다"))
                 return
         markup = None
         if self.markup_used:
@@ -732,8 +757,11 @@ class _Run:
         self._done(path, "승인대기", reason)
 
     def _master(self):
+        """이번 실행의 고객마스터(실행 시작 때 읽은 바이트로 처음 쓸 때 만든다). 쓸 수 없으면 MasterError."""
         if self.master is None:
-            self.master = load_master(self.work / MASTER_FILE)
+            if self.master_bytes is None:
+                raise MasterError(self.master_read_error or f"{MASTER_FILE} 를 읽지 못했습니다")
+            self.master = master_from_bytes(self.master_bytes)
         return self.master
 
     def _to_waiting(self, path, fp, result, checks):

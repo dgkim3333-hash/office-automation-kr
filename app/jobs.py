@@ -122,9 +122,34 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def create_job(work, title: str, input_dir, output_dir, output_mode: str) -> Job:
+def _check_mode(output_mode: str) -> str:
     if output_mode not in OUTPUT_MODES:
         raise JobError(f"출력 방식 '{output_mode}' 을 쓸 수 없습니다. 고를 수 있는 것: {', '.join(OUTPUT_MODES)}")
+    return output_mode
+
+
+def _check_pair(input_dir, output_dir) -> None:
+    if _overlaps(input_dir, output_dir):
+        raise JobError(
+            "입력 폴더와 출력 폴더는 서로 다른 폴더여야 합니다(한쪽이 다른 쪽 안에 있어도 안 됩니다). "
+            f"결과 파일이 다시 입력으로 읽히기 때문입니다.\n입력: {input_dir}\n출력: {output_dir}")
+
+
+def checked_settings(job: Job, input_dir=None, output_dir=None, output_mode: str | None = None):
+    """job set 이 바꿀 값을 create_job 과 같은 기준으로 검사해 (입력, 출력, 방식)을 돌려준다. 저장하지 않는다.
+    주지 않은 값은 지금 값을 쓴다. 하나도 주지 않으면 JobError."""
+    if input_dir is None and output_dir is None and output_mode is None:
+        raise JobError("바꿀 것을 적어 주세요: --입력 폴더 · --출력 폴더 · --방식 회사양식|누적장부|둘다")
+    mode = _check_mode(output_mode) if output_mode is not None else job.output_mode
+    new_in = _check_folder(input_dir, "입력") if input_dir is not None else job.input_dir
+    new_out = _check_folder(output_dir, "출력") if output_dir is not None else job.output_dir
+    _check_pair(new_in, new_out)
+    return new_in, new_out, mode
+
+
+def create_job(work, title: str, input_dir, output_dir, output_mode: str, paused: bool = False) -> Job:
+    """작업 폴더 · 작업설정.yaml 을 만든다. paused=True 면 멈춤으로 만든다(job new: 규칙을 채우는 동안 자동 실행이 돌지 않게)."""
+    _check_mode(output_mode)
     title = title.strip()
     safe = _folder_title(title)
     if not safe:
@@ -137,10 +162,7 @@ def create_job(work, title: str, input_dir, output_dir, output_mode: str) -> Job
             "누적장부 파일 이름에 작업 제목이 들어가므로 다른 제목을 쓰세요(대소문자 · 앞뒤 공백 · 못 쓰는 글자 차이는 같은 이름으로 봅니다).")
     input_dir = _check_folder(input_dir, "입력")
     output_dir = _check_folder(output_dir, "출력")
-    if _overlaps(input_dir, output_dir):
-        raise JobError(
-            "입력 폴더와 출력 폴더는 서로 다른 폴더여야 합니다(한쪽이 다른 쪽 안에 있어도 안 됩니다). "
-            f"결과 파일이 다시 입력으로 읽히기 때문입니다.\n입력: {input_dir}\n출력: {output_dir}")
+    _check_pair(input_dir, output_dir)
     number = _next_number(root)
     folder = root / f"{number:02d}_{safe}"
     folder.mkdir(parents=True)
@@ -155,6 +177,7 @@ def create_job(work, title: str, input_dir, output_dir, output_mode: str) -> Job
         output_dir=output_dir,
         output_mode=output_mode,
         run_time=slot_time(number),
+        paused=paused,
     )
     save_job(job)
     return job

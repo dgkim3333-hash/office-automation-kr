@@ -153,7 +153,7 @@ $LegacyFiles = @(
     '02_설치.md', '03_첫_실행_10분.md', '04_내_양식_가르치기.md', '05_매일_쓰기.md',
     '06_프로젝트와_예정됨.md', '07_선택_Outlook_자동수집.md', '08_선택_엑셀PO변환.md',
     '04_첫_실행_10분.md', '09_선택_엑셀PO변환.md',
-    '04_처음_처리하기.md', '수집.bat', 'tests/test_e2e.py', 'tests/test_e2e_excel.py'
+    '04_처음_처리하기.md', '수집.bat', '체험.bat', 'tests/test_e2e.py', 'tests/test_e2e_excel.py'
 )
 
 function Remove-StaleFiles($repo, $newFiles) {
