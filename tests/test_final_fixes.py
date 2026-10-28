@@ -489,3 +489,55 @@ def test_docs_say_not_to_paste_markup_reasons(doc):
 def test_outputs_has_no_stray_long_whitespace_inside_lines():
     for n, line in enumerate((REPO / "app" / "outputs.py").read_text(encoding="utf-8").splitlines(), 1):
         assert not re.search(r"\S {8,}\S", line), f"outputs.py {n}줄"
+
+
+# --- 10. 승인대기 사이 고객마스터의 그 고객 줄이 바뀌면 본 적 없는 값을 내보내지 않는다 ---
+
+REMADE_MASTER_TEXT = "고객마스터의 이 고객 줄이 바뀌어 대조표를 새로 만들었습니다"
+
+
+def _set_master(work, customer_part, column, value):
+    path = work / "고객마스터.xlsx"
+    wb = openpyxl.load_workbook(path)
+    ws = wb.worksheets[0]
+    header = [c.value for c in ws[1]]
+    for row in ws.iter_rows(min_row=2):
+        if customer_part in str(row[0].value):
+            row[header.index(column)].value = value
+    wb.save(path)
+
+
+def _company_terms(path):
+    rows = _sheet(path, "회사양식") if "회사양식" in openpyxl.load_workbook(path).sheetnames else None
+    rows = rows or [list(r) for r in openpyxl.load_workbook(path).worksheets[0].iter_rows(values_only=True)]
+    header = next(r for r in rows if "Payment Terms" in r)
+    col = header.index("Payment Terms")
+    return {r[col] for r in rows[rows.index(header) + 1:] if r[col]}
+
+
+def test_master_row_change_while_waiting_remakes_check(env):
+    work, inp, out = env
+    job = _job(work, inp, out, "둘다")
+    _drop(ACME_PO, inp)
+    assert run_job(job, work, gate=approval_gate).counts["승인대기"] == 1
+    _set_master(work, "ACME", "결제조건", "Net 90")  # 친구가 대조표를 본 뒤 고객마스터를 고침
+    report = approve(load_job(job.folder), work)
+    assert report.counts["성공"] == 0 and report.counts["승인대기"] == 1
+    assert REMADE_MASTER_TEXT in report.message
+    assert COMPANY_ACME not in _files(out)
+    [check] = sorted((job.folder / "승인대기" / "대조표").glob("*.xlsx"))
+    assert _company_terms(check) == {"Net 90"}  # 새 대조표에 바뀐 값이 보인다
+    report = approve(load_job(job.folder), work)  # 새 대조표를 본 뒤 승인
+    assert report.counts["성공"] == 1
+    assert _company_terms(out / COMPANY_ACME) == {"Net 90"}
+
+
+def test_other_customer_master_change_does_not_remake_check(env):
+    work, inp, out = env
+    job = _job(work, inp, out, "둘다")
+    _drop(ACME_PO, inp)
+    assert run_job(job, work, gate=approval_gate).counts["승인대기"] == 1
+    _set_master(work, "Hanil", "결제조건", "Net 90")  # 다른 고객 줄만 바뀜
+    report = approve(load_job(job.folder), work)
+    assert report.counts["성공"] == 1 and REMADE_MASTER_TEXT not in report.message
+    assert _company_terms(out / COMPANY_ACME) == {"Net 60"}

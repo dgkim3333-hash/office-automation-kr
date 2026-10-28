@@ -27,7 +27,7 @@ from app.log import append_log
 from app.markup import (
     MARKUP_FILE, MarkupError, markup_checks, markup_from_bytes, markup_stamp, missing_reason, written_markup,
 )
-from app.master import MasterError, lookup, master_from_bytes
+from app.master import MasterError, lookup, master_from_bytes, master_stamp
 from app.organize import free_name
 from app.outputs import (
     _same_value, _text, company_form_name, company_rows, company_workbook, read_back, write_check_file,
@@ -69,11 +69,13 @@ REMAKE_HINT = "그러면 내일 실행 때(또는 규칙.yaml 을 고친 뒤) �
 STAMP_FORM = "form_fingerprint"  # 승인대기 대조표 속성: 만들 때의 양식 지문
 STAMP_FILE = "file_fingerprint"  # 승인대기 대조표 속성: 만들 때의 복사본 지문
 STAMP_MARKUP = "markup_fingerprint"  # 승인대기 대조표 속성: 그 문서가 쓰는 마크업표 줄들의 지문(마크업을 쓸 때만)
+STAMP_MASTER = "master_fingerprint"  # 승인대기 대조표 속성: 그 문서 고객의 고객마스터 줄 지문(고객마스터를 쓸 때만)
 REMADE_RULES = "규칙 또는 출력 방식이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 REMADE_MISSING = "대조표가 없어 새로 만들었습니다. 보고 승인하세요"
 NOT_DETECTED_WAITING = "승인대기의 이 파일을 지금 규칙으로 알아보지 못했습니다. 규칙을 고치거나 복사본을 지워 거절하세요"
 REMADE_FILE = "승인대기의 파일이 대조표를 만든 뒤 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 REMADE_MARKUP = "마크업표에서 이 문서 파트의 마크업이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
+REMADE_MASTER = "고객마스터의 이 고객 줄이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 APPROVAL_RETRY_NOTE = ("고친 뒤(규칙.yaml · 고객마스터 등) 다시 승인하면 다시 확인합니다. "
                        f"승인하지 않을 문서면 {WAITING} 폴더의 그 복사본을 지우세요.")
 
@@ -682,13 +684,13 @@ class _Run:
         # 대조표 · 검산 파일에 회사 양식에 들어갈 값(고객마스터 · 마크업 값 포함)을 그대로 보이게
         company = company_rows(result, master_row, form, markup) if self.job.output_mode in COMPANY_MODES else None
         if self.approving:
-            reason = self._unseen(path, fp, result)
+            reason = self._unseen(path, fp, result, master_row)
             if reason:  # 친구가 대조표에서 본 값이 아니므로 내보내지 않는다
-                self._remake_check(path, fp, result, checks, reason, company)
+                self._remake_check(path, fp, result, checks, reason, company, master_row)
                 return
         if self.rejected is not None or (self.gate is not None and self.gate(self.job, self.rules, result)):
             # 승인하지 않은 문서를 다시 처리하면 승인 수와 상관없이 늘 승인대기로(자동 실행이 내보내지 않음)
-            self._to_waiting(path, fp, result, checks, company)
+            self._to_waiting(path, fp, result, checks, company, master_row)
             return
         self._write(path, fp, result, key, checks, master_row, markup, company)
 
@@ -723,29 +725,35 @@ class _Run:
             return False
         return self._markup_fp(result) != recorded
 
-    def _stamps(self, fp, result) -> dict:
+    def _stamps(self, fp, result, master_row=None) -> dict:
         stamps = {STAMP_FORM: self._form_fp(result), STAMP_FILE: fp}
         markup = self._markup_fp(result)
         if markup:
             stamps[STAMP_MARKUP] = markup
+        master = master_stamp(master_row)
+        if master:
+            stamps[STAMP_MASTER] = master
         return stamps
 
-    def _unseen(self, path, fp, result) -> str | None:
-        """이 복사본의 대조표가 지금 값과 같은 규칙 · 같은 파일로 만든 것인지. 아니면 그 사유."""
+    def _unseen(self, path, fp, result, master_row=None) -> str | None:
+        """이 복사본의 대조표가 지금 값과 같은 규칙 · 같은 파일 · 같은 고객 줄 · 같은 마크업으로 만든 것인지. 아니면 그 사유."""
         entries = self._checks().get(path.name.casefold(), [])
         if not entries:
             return REMADE_MISSING
-        now = self._stamps(fp, result)
+        now = self._stamps(fp, result, master_row)
         if any(stamps == now for _, stamps in entries):
             return None
-        if STAMP_MARKUP in now and any(stamps.get(STAMP_FILE) == fp and stamps.get(STAMP_FORM) == now[STAMP_FORM]
-                                       for _, stamps in entries):
-            return REMADE_MARKUP  # 규칙 · 파일은 그대로, 이 문서 파트의 마크업만 바뀜
+        same = [stamps for _, stamps in entries
+                if stamps.get(STAMP_FILE) == fp and stamps.get(STAMP_FORM) == now[STAMP_FORM]]
+        if same:  # 규칙 · 파일은 그대로: 고객마스터 줄이나 마크업만 바뀜
+            if not any(stamps.get(STAMP_MASTER) == now.get(STAMP_MASTER) for stamps in same):
+                return REMADE_MASTER
+            return REMADE_MARKUP
         if any(stamps.get(STAMP_FILE) == fp for _, stamps in entries):
             return REMADE_RULES
         return REMADE_FILE
 
-    def _write_waiting_check(self, copy: Path, fp, result, checks, company=None):
+    def _write_waiting_check(self, copy: Path, fp, result, checks, company=None, master_row=None):
         """승인대기 대조표를 (다시) 만든다. 같은 복사본 이름을 가리키던 옛 대조표는 지운다."""
         name = copy.name.casefold()
         for old, _ in self._checks().get(name, []):
@@ -753,14 +761,14 @@ class _Run:
                 old.unlink(missing_ok=True)
             except OSError as e:
                 self.warnings.append(f"경고: 옛 대조표를 지우지 못함 ({old.name}): {e}")
-        stamps = self._stamps(fp, result)
+        stamps = self._stamps(fp, result, master_row)
         # 대조표의 원본파일 칸 = 복사본 이름. 승인이 이 이름으로 대조표와 복사본을 짝짓는다
         check = write_check_file(copy.parent / WAITING_CHECKS, result, checks, copy.name, stamps, company)
         self._checks()[name] = [(check, stamps)]
 
-    def _remake_check(self, path, fp, result, checks, reason, company=None):
+    def _remake_check(self, path, fp, result, checks, reason, company=None, master_row=None):
         try:
-            self._write_waiting_check(path, fp, result, checks, company)
+            self._write_waiting_check(path, fp, result, checks, company, master_row)
         except Exception as e:
             self._review(path, fp, result, f"대조표를 새로 만들지 못함: {e}")
             return
@@ -776,13 +784,13 @@ class _Run:
             self.master = master_from_bytes(self.master_bytes)
         return self.master
 
-    def _to_waiting(self, path, fp, result, checks, company=None):
+    def _to_waiting(self, path, fp, result, checks, company=None, master_row=None):
         waiting = Path(self.job.folder) / WAITING
         waiting.mkdir(parents=True, exist_ok=True)
         copy = free_name(waiting / path.name)
         try:
             shutil.copy2(path, copy)
-            self._write_waiting_check(copy, fp, result, checks, company)
+            self._write_waiting_check(copy, fp, result, checks, company, master_row)
         except Exception as e:
             if copy.exists():
                 copy.unlink()

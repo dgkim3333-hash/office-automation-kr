@@ -1,4 +1,5 @@
 """고객마스터.xlsx: 고객명 → 고객코드·결제조건·기본 인도조건. 회사 정보라 사용자가 직접 채운다."""
+import hashlib
 import io
 from pathlib import Path
 
@@ -57,6 +58,15 @@ def _master_from(source) -> dict[str, dict]:
 def lookup(master, customer_name):
     """고객명으로 찾는다(대소문자·띄어쓰기 차이는 무시). 없으면 None."""
     return master.get(_key(customer_name))
+
+
+def master_stamp(row) -> str:
+    """고객마스터 한 고객 줄의 지문. 승인대기 대조표에 남겨, 친구가 본 뒤 그 고객 줄이 바뀌면 대조표를 새로 만든다
+    (다른 고객 줄을 더하거나 고친 것은 상관없음). 줄을 쓰지 않으면 빈 글자."""
+    if row is None:
+        return ""
+    text = "\n".join(f"{k}\t{type(v).__name__}\t{v}" for k, v in sorted(row.items()))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def write_example(path):
