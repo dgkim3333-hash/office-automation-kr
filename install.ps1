@@ -180,16 +180,19 @@ try {
     if (-not (Test-Cmd uvx)) { throw 'uvx 를 찾지 못했습니다.' }
 
     Step 4 '사무 자동화 프로그램'
+    # 다시 실행하면 프로그램 파일만 새 판으로 덮어쓴다. 작업폴더.txt·.venv·내가 넣은 파일은 그대로 둔다.
     $repo = Join-Path $InstallDir 'office-automation-kr-main'
-    if (Test-Path -LiteralPath (Join-Path $repo 'run.bat')) { Done "이미 있습니다. $repo" }
-    else {
-        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-        $zip = Join-Path $InstallDir 'office-automation-kr-main.zip'
-        Get-File $RepoZip $zip
-        Expand-Archive -LiteralPath $zip -DestinationPath $InstallDir -Force
-        Remove-Item -LiteralPath $zip -Force
-        Done "받았습니다. $repo"
-    }
+    $hadBefore = Test-Path -LiteralPath (Join-Path $repo 'run.bat')
+    New-Item -ItemType Directory -Force -Path $repo | Out-Null
+    $zip = Join-Path $InstallDir 'office-automation-kr-main.zip'
+    Get-File $RepoZip $zip
+    $fresh = Expand-ToTemp $zip
+    Remove-Item -LiteralPath $zip -Force
+    Get-ChildItem -LiteralPath (Join-Path $fresh 'office-automation-kr-main') -Force |
+        Copy-Item -Destination $repo -Recurse -Force
+    Remove-Item -LiteralPath $fresh -Recurse -Force -ErrorAction SilentlyContinue
+    if ($hadBefore) { Done "새 판으로 바꿨습니다. $repo (작업 폴더와 내 파일은 그대로)" }
+    else { Done "받았습니다. $repo" }
 
     Step 5 '작업 폴더 (처음 한 번은 1~3분 걸립니다)'
     Push-Location -LiteralPath $repo

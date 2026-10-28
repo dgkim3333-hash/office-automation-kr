@@ -63,15 +63,31 @@ def test_dry_run_downloads_repo_and_makes_work_folder(tmp_path, repo_zip):
     assert not zipfile.is_zipfile(install_dir / "office-automation-kr-main.zip")  # 임시 zip 은 지움
 
 
-def test_dry_run_twice_keeps_existing_repo(tmp_path, repo_zip):
+def test_rerun_updates_program_but_keeps_my_files(tmp_path, repo_zip):
     install_dir = tmp_path / "dev"
-    args = ("-DryRun", "-RepoZip", str(repo_zip), "-InstallDir", str(install_dir),
-            "-WorkDir", str(tmp_path / "사무자동화"))
+    work_dir = tmp_path / "사무자동화"
+    args = ("-DryRun", "-RepoZip", str(repo_zip), "-InstallDir", str(install_dir), "-WorkDir", str(work_dir))
     assert _run_like_irm(*args).returncode == 0
-    marker = install_dir / "office-automation-kr-main" / "내메모.txt"
+    repo = install_dir / "office-automation-kr-main"
+
+    # 옛 판 흉내: 프로그램 파일(맨 위·하위 폴더)을 낡은 내용으로 바꿔 둔다
+    (repo / "README.md").write_text("옛 판", encoding="utf-8")
+    (repo / "app" / "config.py").write_text("# 옛 판", encoding="utf-8")
+    marker = repo / "내메모.txt"
     marker.write_text("지우면 안 됨", encoding="utf-8")
-    assert _run_like_irm(*args).returncode == 0
+    (work_dir / "받은문서" / "고객.pdf").write_bytes(b"%PDF")
+
+    proc = _run_like_irm(*args)
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
+    assert "새 판" in out
+    assert (repo / "README.md").read_bytes() == (REPO / "README.md").read_bytes()
+    assert (repo / "app" / "config.py").read_bytes() == (REPO / "app" / "config.py").read_bytes()
     assert marker.read_text(encoding="utf-8") == "지우면 안 됨"
+    assert (work_dir / "받은문서" / "고객.pdf").read_bytes() == b"%PDF"
+    assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work_dir)
+    assert not (repo / "office-automation-kr-main").exists()  # 폴더 안에 한 겹 더 생기지 않음
+    assert not (repo / "app" / "app").exists() and not (repo / "samples" / "samples").exists()
 
 
 TEMPLATE = REPO / "claude" / "전역_CLAUDE.md"
