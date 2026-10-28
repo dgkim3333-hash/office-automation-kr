@@ -87,3 +87,23 @@ def test_rerun_new_path_typed_when_picker_cancelled(tmp_path, repo):
     assert result == (tmp_path / "new").resolve()
     assert (tmp_path / "new" / "받은문서").is_dir()
     assert (tmp_path / "old" / "받은문서").is_dir()  # 기존 데이터는 그대로
+
+
+def test_main_init_with_path_does_not_ask(repo, tmp_path, monkeypatch, capsys):
+    """설치 스크립트용: python -m app init <경로> 는 묻지 않고 바로 만든다."""
+    from app.__main__ import main
+
+    import app.init as init_module
+
+    def must_not_ask(*args):
+        raise AssertionError("물으면 안 됨")
+
+    monkeypatch.setattr("builtins.input", must_not_ask)
+    work_dir, repo_root, _, _ = init_module.init.__defaults__
+    monkeypatch.setattr(init_module.init, "__defaults__", (work_dir, repo_root, must_not_ask, must_not_ask))
+    work = tmp_path / "사무자동화"
+    assert main(["init", str(work)], repo_root=repo) == 0
+    assert (work / "받은문서" / "중복").is_dir()
+    assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work.resolve())
+    assert main(["init", str(work)], repo_root=repo) == 0  # 다시 실행해도 그대로
+    assert "03장" in capsys.readouterr().out
