@@ -19,25 +19,20 @@ def repo(tmp_path):
     return root
 
 
-def test_creates_four_folders(tmp_path, repo):
+def test_creates_jobs_folder_and_master_only(tmp_path, repo):
     work = tmp_path / "사무자동화"
     init(work_dir=work, repo_root=repo)
-    for sub in ["받은문서", "받은문서/중복", "정리문서", "확인필요"]:
-        assert (work / sub).is_dir(), sub
+    assert sorted(p.name for p in work.iterdir()) == ["고객마스터.xlsx", "작업"]
+    assert (work / "작업").is_dir()
 
 
-def test_copies_example_rules(tmp_path, repo):
+def test_keeps_existing_master_and_jobs(tmp_path, repo):
     work = tmp_path / "사무자동화"
+    (work / "작업" / "01_일일 정리").mkdir(parents=True)
+    (work / "고객마스터.xlsx").write_bytes(b"mine")
     init(work_dir=work, repo_root=repo)
-    assert (work / "규칙.yaml").read_bytes() == (repo / "rules" / "규칙.예시.yaml").read_bytes()
-
-
-def test_keeps_existing_rules(tmp_path, repo):
-    work = tmp_path / "사무자동화"
-    work.mkdir()
-    (work / "규칙.yaml").write_text("내 규칙", encoding="utf-8")
-    init(work_dir=work, repo_root=repo)
-    assert (work / "규칙.yaml").read_text(encoding="utf-8") == "내 규칙"
+    assert (work / "고객마스터.xlsx").read_bytes() == b"mine"
+    assert (work / "작업" / "01_일일 정리").is_dir()
 
 
 @pytest.mark.parametrize("sub", ["", "rules", "a/b"])
@@ -85,8 +80,8 @@ def test_rerun_new_path_typed_when_picker_cancelled(tmp_path, repo):
     answers = iter(["y", str(tmp_path / "new")])
     result = init(repo_root=repo, ask=lambda prompt: next(answers), pick=lambda: "")
     assert result == (tmp_path / "new").resolve()
-    assert (tmp_path / "new" / "받은문서").is_dir()
-    assert (tmp_path / "old" / "받은문서").is_dir()  # 기존 데이터는 그대로
+    assert (tmp_path / "new" / "작업").is_dir()
+    assert (tmp_path / "old" / "작업").is_dir()  # 기존 데이터는 그대로
 
 
 def test_main_init_with_path_does_not_ask(repo, tmp_path, monkeypatch, capsys):
@@ -103,7 +98,7 @@ def test_main_init_with_path_does_not_ask(repo, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(init_module.init, "__defaults__", (work_dir, repo_root, must_not_ask, must_not_ask))
     work = tmp_path / "사무자동화"
     assert main(["init", str(work)], repo_root=repo) == 0
-    assert (work / "받은문서" / "중복").is_dir()
+    assert (work / "작업").is_dir() and (work / "고객마스터.xlsx").is_file()
     assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work.resolve())
     assert main(["init", str(work)], repo_root=repo) == 0  # 다시 실행해도 그대로
     assert "04장" in capsys.readouterr().out

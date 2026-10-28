@@ -1,19 +1,17 @@
-"""설치.bat 본체: 작업 폴더를 고르고 빈 구조를 만든다."""
-import shutil
+"""설치.bat 본체: 작업 폴더를 고르고 빈 구조(작업\\ · 고객마스터.xlsx)를 만든다. 폴더 고르기 창도 여기 있다."""
 from pathlib import Path
 
 from app import config
+from app.jobs import JOBS_DIR
 from app.local_guard import LocalOnlyError, check_work_dir
 from app.master import write_example
-
-SUBFOLDERS = [config.INBOX, f"{config.INBOX}/{config.DUPLICATES}", config.ORGANIZED, config.REVIEW, config.OUTPUT]
 
 
 class InitError(Exception):
     pass
 
 
-def _pick_folder() -> str:
+def pick_folder(title: str) -> str:
     """Windows 폴더 선택 창. 쓸 수 없거나 취소하면 빈 문자열."""
     try:
         import tkinter
@@ -24,9 +22,13 @@ def _pick_folder() -> str:
     root.withdraw()
     root.attributes("-topmost", True)
     try:
-        return filedialog.askdirectory(title="작업 폴더를 고르세요 (예: 문서\\사무자동화)") or ""
+        return filedialog.askdirectory(title=title) or ""
     finally:
         root.destroy()
+
+
+def _pick_work_folder() -> str:
+    return pick_folder("작업 폴더를 고르세요 (예: 문서\\사무자동화)")
 
 
 def _choose(repo_root, ask, pick) -> Path:
@@ -48,7 +50,9 @@ def _is_inside(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
-def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_folder) -> Path:
+def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_work_folder) -> Path:
+    """작업 폴더에 작업\\ 과 고객마스터.xlsx(없을 때만)를 만들고 위치를 작업폴더.txt 에 적는다.
+    작업마다의 폴더 · 규칙은 job new 가 만든다."""
     repo_root = Path(repo_root).resolve()
     if work_dir is None:
         work_dir = _choose(repo_root, ask, pick)
@@ -65,11 +69,7 @@ def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_folder
     except LocalOnlyError as e:
         raise InitError(str(e)) from None
 
-    for sub in SUBFOLDERS:
-        (work_dir / sub).mkdir(parents=True, exist_ok=True)
-    rules = work_dir / config.RULES_FILE
-    if not rules.exists():
-        shutil.copyfile(repo_root / config.EXAMPLE_RULES, rules)
+    (work_dir / JOBS_DIR).mkdir(parents=True, exist_ok=True)
     master = work_dir / config.MASTER_FILE
     if not master.exists():  # 있으면 사용자가 채운 것이므로 건드리지 않는다
         write_example(master)

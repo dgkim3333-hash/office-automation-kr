@@ -1,4 +1,4 @@
-"""(선택) Outlook 폴더 → 받은문서/. COM 은 가짜 객체로 대신한다."""
+"""(선택) Outlook 폴더 → 작업의 입력 폴더. COM 은 가짜 객체로 대신한다."""
 from pathlib import Path
 
 from app.outlook import DONE_CATEGORY, collect, collect_from_outlook
@@ -82,17 +82,29 @@ def test_without_outlook_prints_korean_message(tmp_path, capsys):
     assert "Outlook" in capsys.readouterr().out
 
 
-def test_main_outlook_command_saves_into_inbox(tmp_path, monkeypatch):
+def test_main_outlook_command_saves_into_job_input_folder(tmp_path, monkeypatch):
     import shutil
 
     import app.__main__ as cli
     from app.init import init
+    from app.jobs import create_job
 
     repo = tmp_path / "repo"
     (repo / "rules").mkdir(parents=True)
     shutil.copy(Path(__file__).resolve().parent.parent / "rules" / "규칙.예시.yaml", repo / "rules")
     work = init(work_dir=tmp_path / "work", repo_root=repo)
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    create_job(work, "일일 정리", inp, out, "누적장부")
     calls = []
-    monkeypatch.setattr(cli, "collect_from_outlook", lambda inbox: calls.append(inbox) or [])
-    assert cli.main(["outlook"], repo_root=repo) == 0
-    assert calls == [work / "받은문서"]
+    monkeypatch.setattr(cli, "collect_from_outlook", lambda folder: calls.append(folder) or [])
+    assert cli.main(["outlook", "1"], repo_root=repo) == 0
+    assert calls == [inp]
+
+
+def test_outlook_message_names_input_folder_not_inbox(tmp_path, capsys):
+    collect_from_outlook(tmp_path, connect=lambda: [FakeMail([FakeAttachment("a.pdf")])])
+    out = capsys.readouterr().out
+    assert "입력 폴더" in out and str(tmp_path) in out
+    assert "받은문서" not in out

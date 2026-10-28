@@ -60,9 +60,10 @@ def _files(folder):
 
 
 def _approved(job, key, count):
-    """그 양식이 지금 규칙으로 이미 count 건 승인된 상태로 둔다."""
+    """그 양식이 지금 규칙으로 이미 count 건 승인된 상태로 둔다(작업설정.yaml 에 저장. 실행은 잠금 뒤 다시 읽는다)."""
     job.approvals[key] = count
     job.fingerprints[key] = form_fingerprint(job.rules_path, key)
+    save_job(job)
 
 
 def test_form_key_and_fingerprint(env):
@@ -601,3 +602,49 @@ def test_approval_counts_under_rules_read_at_start(env, monkeypatch):
 
     assert approve(job, work).counts["성공"] == 1
     assert job.fingerprints["ACME"] == want and job.approvals["ACME"] == 1
+
+
+# --- 판단 18: 잠금을 잡은 뒤 작업 설정을 디스크에서 다시 읽는다 ---
+
+@pytest.mark.parametrize("stale_fp", ["current", "old"])
+def test_stale_job_cannot_resurrect_old_approval_count(env, stale_fp):
+    """프로세스 B 가 잠금 전에 읽어 둔 옛 Job(승인 10건)으로 실행해도, 디스크의 지금 설정(0건)을 따라 승인대기로 간다.
+
+    current: 규칙이 바뀌었다가 되돌아와 디스크에서는 0 으로 리셋됐지만 B 의 옛 Job 은 같은 지문 + 10건(가장 위험한 경우).
+    old: B 의 옛 Job 은 옛 지문 + 10건, 디스크는 새 지문 + 0건.
+    """
+    work, inp, out, job = env
+    stale = load_job(job.folder)
+    stale.approvals["ACME"] = REQUIRED
+    stale.fingerprints["ACME"] = form_fingerprint(job.rules_path, "ACME") if stale_fp == "current" else "0" * 16
+    on_disk = load_job(job.folder)
+    on_disk.approvals = {"ACME": 0, "HANIL": 3}  # 다른 프로세스가 저장한 값(HANIL 3 은 B 가 모름)
+    on_disk.fingerprints = {"ACME": form_fingerprint(job.rules_path, "ACME"),
+                            "HANIL": form_fingerprint(job.rules_path, "HANIL")}
+    save_job(on_disk)
+    _drop(ACME_PO, inp)
+
+    report = run_job(stale, work, gate=approval_gate)
+
+    assert report.counts["승인대기"] == 1 and report.counts["성공"] == 0
+    assert COMPANY_ACME not in _files(out)
+    saved = load_job(job.folder)
+    assert saved.approvals == {"ACME": 0, "HANIL": 3}  # B 가 다른 프로세스의 저장을 덮어쓰지 않음
+    assert stale.approvals == saved.approvals  # 부른 쪽 Job 도 지금 설정으로 바뀐다
+
+
+def test_approve_with_stale_job_counts_from_disk(env):
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    stale = load_job(job.folder)
+    on_disk = load_job(job.folder)
+    on_disk.approvals["HANIL"] = 4
+    on_disk.fingerprints["HANIL"] = form_fingerprint(job.rules_path, "HANIL")
+    save_job(on_disk)
+
+    report = approve(stale, work)
+
+    assert report.counts["성공"] == 1
+    assert load_job(job.folder).approvals == {"ACME": 1, "HANIL": 4}
+    assert "ACME 1/10" in report.message

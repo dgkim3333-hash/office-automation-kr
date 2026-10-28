@@ -59,7 +59,7 @@ def test_dry_run_downloads_repo_and_makes_work_folder(tmp_path, repo_zip):
     assert proc.returncode == 0, out
     repo = install_dir / "office-automation-kr-main"
     assert (repo / "run.bat").is_file()
-    assert (work_dir / "받은문서" / "중복").is_dir()
+    assert (work_dir / "작업").is_dir() and (work_dir / "고객마스터.xlsx").is_file()
     assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work_dir)
     assert not zipfile.is_zipfile(install_dir / "office-automation-kr-main.zip")  # 임시 zip 은 지움
 
@@ -76,7 +76,7 @@ def test_rerun_updates_program_but_keeps_my_files(tmp_path, repo_zip):
     (repo / "app" / "config.py").write_text("# 옛 판", encoding="utf-8")
     marker = repo / "내메모.txt"
     marker.write_text("지우면 안 됨", encoding="utf-8")
-    (work_dir / "받은문서" / "고객.pdf").write_bytes(b"%PDF")
+    (work_dir / "작업" / "고객.pdf").write_bytes(b"%PDF")
 
     proc = _run_like_irm(*args)
     out = proc.stdout.decode("utf-8", "replace")
@@ -85,7 +85,7 @@ def test_rerun_updates_program_but_keeps_my_files(tmp_path, repo_zip):
     assert (repo / "README.md").read_bytes() == (REPO / "README.md").read_bytes()
     assert (repo / "app" / "config.py").read_bytes() == (REPO / "app" / "config.py").read_bytes()
     assert marker.read_text(encoding="utf-8") == "지우면 안 됨"
-    assert (work_dir / "받은문서" / "고객.pdf").read_bytes() == b"%PDF"
+    assert (work_dir / "작업" / "고객.pdf").read_bytes() == b"%PDF"
     assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work_dir)
     assert not (repo / "office-automation-kr-main").exists()  # 폴더 안에 한 겹 더 생기지 않음
     assert not (repo / "app" / "app").exists() and not (repo / "samples" / "samples").exists()
@@ -219,7 +219,7 @@ def test_part_program_runs_only_program_steps(tmp_path, repo_zip):
     assert "] Claude Desktop" not in out and "] Node.js" not in out  # 1~3단계 제목이 없음
     assert "[1/3] 사무 자동화 프로그램" in out and "[3/3] 기본 약속" in out
     assert (install_dir / "office-automation-kr-main" / "run.bat").is_file()
-    assert (work_dir / "받은문서").is_dir()
+    assert (work_dir / "작업").is_dir()
     assert (home / "CLAUDE.md").is_file()
     assert "04장" in out
 

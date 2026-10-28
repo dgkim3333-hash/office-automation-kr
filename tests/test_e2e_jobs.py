@@ -144,3 +144,44 @@ def test_second_run_of_both_jobs_has_no_news(env):
 
     assert [r.has_news for r in again] == [False, False]  # 서신은 하루가 안 돼 「맞지 않는 파일」로 세지 않음
     assert _snapshot(out) == ledgers
+
+
+def test_excel_job_po_items_match_expected(env):
+    work, out, _, excel_job = env
+    run_job(excel_job, work)
+    key = lambda r: (r["문서종류"], r["문서번호"], str(r["줄"]))  # noqa: E731
+    got = sorted(_records(out / "누적장부_PO 입력.xlsx", "품목"), key=key)
+    expected = sorted((r for r in _records(EXPECTED, "품목") if r["문서종류"] == "PO"), key=key)
+    assert len(got) == len(expected) == 7
+    for g, e in zip(got, expected):
+        for column, value in e.items():
+            assert _same(g[column], value), f"품목 {key(e)} {column}: {g[column]!r} != {value!r}"
+
+
+def test_customer_not_in_master_goes_to_review(env):
+    work, out, _, excel_job = env
+    wb = openpyxl.load_workbook(work / "고객마스터.xlsx")
+    wb.active.delete_rows(2)  # ACME 줄을 지움
+    wb.save(work / "고객마스터.xlsx")
+
+    report = run_job(excel_job, work)
+
+    assert report.counts["성공"] == 1 and report.counts["확인필요"] == 1
+    note = (excel_job.folder / "확인필요" / "고객오더_ACME_PO-ACME-2026-0417.xlsx.txt").read_text(encoding="utf-8")
+    assert "고객마스터" in note and "ACME" in note
+    assert not (out / "회사양식_SO입력_PO-ACME-2026-0417.xlsx").exists()
+
+
+def test_excel_lock_file_in_input_is_ignored(env):
+    work, out, _, excel_job = env
+    for f in list(excel_job.input_dir.iterdir()):
+        f.unlink()
+    lock = excel_job.input_dir / "~$주문.xlsx"
+    lock.write_bytes(b"lock")
+    t = time.time() - 2 * 24 * 3600
+    os.utime(lock, (t, t))
+
+    report = run_job(excel_job, work)
+
+    assert not report.has_news and report.unmatched_old == 0
+    assert lock.exists() and load_records(excel_job) == []

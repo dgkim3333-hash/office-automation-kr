@@ -796,3 +796,25 @@ def test_duplicate_removes_stale_review_note(env, monkeypatch):
 
     assert report.counts["중복"] == 1
     assert not note.exists()
+
+
+def test_one_document_error_does_not_stop_others(env, monkeypatch):
+    """옛 받은문서 흐름의 I3 를 작업 방식으로: 한 문서에서 장부 쓰기가 터져도 그 문서만 확인필요, 나머지는 성공."""
+    work, inp, out = env
+    job = _job(work, inp, out)
+    _drop(INV, inp)
+    _drop(PDFS / "DM-2026-0092.pdf", inp)
+    real_add = job_run.Ledger.add
+
+    def flaky_add(self, result, *args, **kwargs):
+        if result.doc_type.name == "DM":
+            raise ValueError("흉내: 기록 실패")
+        return real_add(self, result, *args, **kwargs)
+
+    monkeypatch.setattr(job_run.Ledger, "add", flaky_add)
+    report = run_job(job, work)
+
+    assert report.counts["성공"] == 1 and report.counts["확인필요"] == 1
+    assert "흉내: 기록 실패" in (job.folder / "확인필요" / "DM-2026-0092.pdf.txt").read_text(encoding="utf-8")
+    assert [r["인보이스번호"] for r in _rows(out / LEDGER, "Invoice")] == ["INV-2026-10231"]
+    assert _rows(out / LEDGER, "DM") == []

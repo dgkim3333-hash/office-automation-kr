@@ -1,4 +1,8 @@
-"""코드 검토(2026-10-28)의 치명 C1~C4 · 중요 I3 재현 테스트."""
+"""코드 검토(2026-10-28)의 치명 C1~C4 · 중요 I3 재현 테스트.
+
+받은문서 흐름을 전제로 한 C3(옮기지 못한 파일 · 처리로그.csv 잠김)와 I3(한 건 오류)의 실행 테스트는 작업 방식으로
+옮겨졌다(tests/test_job_run.py: 열린 파일 보류 · 처리기록 잠김 · 한 문서만 되돌리기). 작업 방식은 원본을 옮기지 않는다.
+"""
 import copy
 import os
 import shutil
@@ -9,8 +13,8 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from app.__main__ import main
 from app.init import init
+from app.jobs import create_job
 from app.ledger import Ledger
 from app.rules import RuleError, load_rules
 
@@ -25,12 +29,11 @@ def env(tmp_path):
     (repo / "rules").mkdir(parents=True)
     shutil.copy(EXAMPLE, repo / "rules" / "규칙.예시.yaml")
     work = init(work_dir=tmp_path / "work", repo_root=repo)
+    (tmp_path / "in").mkdir()
+    (tmp_path / "out").mkdir()
+    job = create_job(work, "일일 정리", tmp_path / "in", tmp_path / "out", "누적장부")
+    shutil.copy(EXAMPLE, job.rules_path)
     return repo, work
-
-
-def _drop(work, *names):
-    for name in names or [p.name for p in SAMPLES.glob("*.pdf")]:
-        shutil.copy(SAMPLES / name, work / "받은문서" / name)
 
 
 def _records(ws):
@@ -95,64 +98,6 @@ def test_c2_backup_before_replace(tmp_path):
     assert (tmp_path / "누적장부.bak.xlsx").read_bytes() == first
 
 
-# --- C3: 이동이 안 되는 파일은 장부에 넣지 않고 그 자리에 둔다 ---
-
-def test_c3_file_open_elsewhere_is_held_not_recorded(env, capsys):
-    repo, work = env
-    _drop(work)
-    held = work / "받은문서" / "INV-2026-10278.pdf"
-    with open(held, "rb"):  # PDF 뷰어로 열어 둔 상태 흉내
-        assert main([], repo_root=repo) == 0
-    out = capsys.readouterr().out
-    assert held.exists()
-    numbers = [r["인보이스번호"] for r in _records(openpyxl.load_workbook(work / "누적장부.xlsx")["Invoice"])]
-    assert numbers == ["INV-2026-10231"]
-    assert "보류 1" in out
-
-    assert main([], repo_root=repo) == 0  # 닫고 다시 실행하면 처리됨
-    assert not held.exists()
-    numbers = [r["인보이스번호"] for r in _records(openpyxl.load_workbook(work / "누적장부.xlsx")["Invoice"])]
-    assert sorted(numbers) == ["INV-2026-10231", "INV-2026-10278"]
-
-
-def test_c3_move_failure_after_save_is_logged_and_repaired_next_run(env, monkeypatch, capsys):
-    repo, work = env
-    _drop(work, "INV-2026-10231.pdf")
-    import app.organize as organize
-
-    real_rename = os.rename
-
-    def failing_rename(src, dst):
-        raise PermissionError("흉내: 이동 실패")
-
-    monkeypatch.setattr(organize.os, "rename", failing_rename)
-    assert main([], repo_root=repo) == 0
-    out = capsys.readouterr().out
-    assert "이동 실패" in out
-    src = work / "받은문서" / "INV-2026-10231.pdf"
-    assert src.exists()  # 원본은 그대로
-
-    monkeypatch.setattr(organize.os, "rename", real_rename)
-    assert main([], repo_root=repo) == 0  # 다음 실행: 장부에는 있고 정리문서에 없으므로 그 자리로 옮김
-    organized = work / "정리문서" / "ACME Semiconductor Korea Co., Ltd" / "2026-10" / "Invoice_INV-2026-10231.pdf"
-    assert organized.exists()
-    assert not src.exists()
-    assert not list((work / "받은문서" / "중복").glob("*.pdf"))
-
-
-def test_c3_open_log_csv_stops_before_anything(env, capsys):
-    repo, work = env
-    _drop(work)
-    main([], repo_root=repo)
-    capsys.readouterr()
-    _drop(work)
-    with open(work / "처리로그.csv", "rb"):  # 엑셀로 csv 를 열어 둔 상태
-        code = main([], repo_root=repo)
-    assert code != 0
-    assert "처리로그.csv" in capsys.readouterr().out
-    assert len(list((work / "받은문서").glob("*.pdf"))) == 6
-
-
 # --- C4: 출력이 파이프여도 utf-8 로 나오고 죽지 않는다 ---
 
 def test_c4_piped_output_is_utf8(env):
@@ -205,21 +150,3 @@ def test_i3_deleted_items_sheet_is_recreated(tmp_path):
     wb.save(book)
     Ledger.open(book, rules).save()
     assert "품목" in openpyxl.load_workbook(book).sheetnames
-
-
-def test_i3_one_bad_item_does_not_stop_others(env, monkeypatch, capsys):
-    repo, work = env
-    _drop(work, "INV-2026-10231.pdf", "DM-2026-0092.pdf")
-    real_add = Ledger.add
-
-    def flaky_add(self, result, *args, **kwargs):
-        if result.doc_type.name == "DM":
-            raise ValueError("흉내: 기록 실패")
-        return real_add(self, result, *args, **kwargs)
-
-    monkeypatch.setattr(Ledger, "add", flaky_add)
-    assert main([], repo_root=repo) == 0
-    out = capsys.readouterr().out
-    assert "성공 1" in out and "확인필요 1" in out
-    assert (work / "확인필요" / "DM-2026-0092.pdf").exists()
-    assert not _records(openpyxl.load_workbook(work / "누적장부.xlsx")["DM"])

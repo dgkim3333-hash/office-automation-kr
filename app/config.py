@@ -1,19 +1,11 @@
-"""경로·파일 이름 상수. 작업 폴더 위치는 저장소 루트의 작업폴더.txt 에서 읽는다."""
+"""경로 · 파일 이름 상수. 작업 폴더 위치는 저장소 루트의 작업폴더.txt 에서 읽는다."""
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORK_DIR_FILE = "작업폴더.txt"
-EXAMPLE_RULES = Path("rules") / "규칙.예시.yaml"
+SKELETON_RULES = Path("rules") / "규칙.뼈대.yaml"  # job new 가 새 작업의 규칙.yaml 로 복사하는 빈 뼈대
 
-INBOX = "받은문서"
-DUPLICATES = "중복"  # 받은문서/중복
-ORGANIZED = "정리문서"
-REVIEW = "확인필요"
-LEDGER_FILE = "누적장부.xlsx"
-LOG_FILE = "처리로그.csv"
-RULES_FILE = "규칙.yaml"
-MASTER_FILE = "고객마스터.xlsx"
-OUTPUT = "출력"  # 문서별 결과 엑셀(회사 양식·추출결과)
+MASTER_FILE = "고객마스터.xlsx"  # 작업 폴더 맨 위. 작업들이 같이 쓴다
 
 NEED_INIT = "설치.bat를 먼저 실행하세요"
 

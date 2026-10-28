@@ -20,7 +20,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from app.excel_extract import read_excel
 from app.extract import extract
 from app.forms import form_key, rules_form_fingerprint
-from app.jobs import Job, _folder_title, list_jobs, save_job
+from app.jobs import Job, JobError, _folder_title, list_jobs, load_job, save_job
 from app.ledger import ITEMS_SHEET, Ledger, LedgerLocked, is_locked
 from app.local_guard import LocalOnlyError, check_work_dir
 from app.log import append_log
@@ -190,10 +190,18 @@ def run_job(job: Job, work: Path, *, now=None, source_dir: Path | None = None, g
     gate(job, rules, result) 가 True 면 결과를 내지 않고 승인대기로 보낸다.
     on_success(job, result) 는 출력까지 끝난 건마다 부른다.
     after(job, report) 는 실행이 끝난 뒤 잠금을 쥔 채 부른다(승인대기 정리처럼 다른 실행과 겹치면 안 되는 일).
+
+    잠금을 잡은 뒤 작업설정.yaml 을 다시 읽어 job 을 그 값으로 바꾼 뒤 실행한다. 잠금 전에 읽어 둔 옛 값
+    (승인 수 · 지문)으로 승인 없이 결과를 내거나 다른 실행이 저장한 값을 덮어쓰지 않게 한다.
     """
     now = (now or datetime.now()).replace(microsecond=0)
-    source = Path(source_dir) if source_dir is not None else Path(job.input_dir)
     with job_lock(job):
+        try:
+            reload_job(job)
+        except JobError as e:
+            return RunReport(message=f"중요: {job.title} 작업을 실행하지 못했습니다(아무 파일도 처리하지 않음).\n{e}",
+                             stopped=True)
+        source = Path(source_dir) if source_dir is not None else Path(job.input_dir)
         report = _Run(job, Path(work), now, source, gate, on_success).run()
         if after is not None:
             try:
@@ -201,6 +209,13 @@ def run_job(job: Job, work: Path, *, now=None, source_dir: Path | None = None, g
             except Exception as e:  # 정리가 실패해도 이번 실행 결과(보고)는 잃지 않는다
                 report.message += f"\n경고: 실행 뒤 정리를 하지 못함 ({e})"
         return report
+
+
+def reload_job(job: Job) -> Job:
+    """작업설정.yaml 을 다시 읽어 job 의 값을 모두 그것으로 바꾼다(부른 쪽이 들고 있는 Job 도 지금 값이 되게).
+    잠금을 쥔 채 부른다. 읽지 못하면 JobError."""
+    vars(job).update(vars(load_job(job.folder)))
+    return job
 
 
 def check_file_info(path) -> tuple[str | None, dict]:

@@ -76,7 +76,7 @@ def test_block_network_refuses_connections_and_restores():
 
 def test_main_prints_local_only_banner(repo, tmp_path, capsys):
     init(work_dir=tmp_path / "work", repo_root=repo)
-    assert main(["check", str(SAMPLE)], repo_root=repo) == 0
+    assert main([], repo_root=repo) == 0  # 작업 목록 안내(처리 없음)
     out = capsys.readouterr().out
     assert "이 PC" in out and "인터넷" in out and "Code 탭" in out
 

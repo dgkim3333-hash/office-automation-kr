@@ -49,9 +49,9 @@ def repo(tmp_path):
     return root
 
 
-def test_init_creates_master_and_output_folder(tmp_path, repo):
+def test_init_creates_master_and_jobs_folder(tmp_path, repo):
     work = init(work_dir=tmp_path / "사무자동화", repo_root=repo)
-    assert (work / "출력").is_dir()
+    assert (work / "작업").is_dir()
     assert lookup(load_master(work / "고객마스터.xlsx"), "Hanil DataCenter Co., Ltd.") is not None
 
 
