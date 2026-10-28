@@ -529,6 +529,7 @@ def test_existing_company_file_without_record_goes_to_review(env):
     text = (job.folder / "확인필요" / "고객오더_ACME_PO-ACME-2026-0417.xlsx.txt").read_text(encoding="utf-8")
     assert "성공 기록이 없음" in text and "끊겼거나 되돌리기가 끝나지 못했을 수 있음" in text
     assert "원본을 치우세요" in text and "회사양식_SO입력_PO-ACME-2026-0417.xlsx 을 지우세요" in text
+    assert "내일 실행 때(또는 규칙.yaml 을 고친 뒤) 새로 만듭니다" in text  # 같은 날 다시 실행해도 건너뛴다
 
 
 def test_record_write_failure_stops_run(env, monkeypatch):

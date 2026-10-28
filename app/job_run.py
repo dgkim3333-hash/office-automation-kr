@@ -58,7 +58,9 @@ SETTLING_REASON = "방금 바뀐 파일(1분 안). 저장이 끝난 뒤 다음 �
 LEDGER_LOCKED_REASON = "누적장부가 엑셀에서 열려 있음. 엑셀을 닫으면 다음 실행 때 처리합니다"
 INTERRUPTED = "처리기록에 성공 기록이 없음. 지난 실행이 중간에 끊겼거나 되돌리기가 끝나지 못했을 수 있음"
 KEEP_HINT = "입력 폴더에서 원본을 치우세요(그대로 두면 날마다 다시 확인필요가 됩니다)."
-REMAKE_HINT = "그러면 다음 실행 때 새로 만듭니다(처리기록은 고칠 필요 없음)."
+REMAKE_HINT = "그러면 내일 실행 때(또는 규칙.yaml 을 고친 뒤) 새로 만듭니다(처리기록은 고칠 필요 없음)."
+APPROVAL_RETRY_NOTE = ("고친 뒤(규칙.yaml · 고객마스터 등) 다시 승인하면 다시 확인합니다. "
+                       f"승인하지 않을 문서면 {WAITING} 폴더의 그 복사본을 지우세요.")
 
 
 class JobLocked(Exception):
@@ -353,11 +355,12 @@ class _Run:
             self.stop_reason = str(e)
             self.report.stopped = True
 
-        self.job.last_run = self.today
-        try:
-            save_job(self.job)
-        except OSError as e:
-            self.warnings.append(f"경고: 작업설정.yaml 에 마지막 실행 날짜를 쓰지 못함 ({e})")
+        if not self.approving:  # 승인은 입력 폴더를 보지 않으므로 그날의 자동 실행(놓친 실행 포함)을 대신하지 않는다
+            self.job.last_run = self.today
+            try:
+                save_job(self.job)
+            except OSError as e:
+                self.warnings.append(f"경고: 작업설정.yaml 에 마지막 실행 날짜를 쓰지 못함 ({e})")
         try:
             self.report.unmatched_old = unmatched_old(self.job, self.work, self.now)
         except Exception as e:  # 마지막 집계가 실패해도 이번 실행 결과(보고)는 잃지 않는다
@@ -420,8 +423,10 @@ class _Run:
         status = row.get("상태")
         if status in ("성공", "중복"):
             return True
+        if self.approving:
+            return False  # 승인은 사람이 누른 실행이므로 승인대기 · 확인필요도 다시 확인한다
         if status == "승인대기":
-            return not self.approving
+            return True
         if status == "확인필요":
             return row.get("날짜") == self.today and row.get("규칙지문") == self.rules_fp
         return False  # 보류: 다음 실행 때 다시
@@ -462,7 +467,8 @@ class _Run:
         copy = free_name(waiting / path.name)
         try:
             shutil.copy2(path, copy)
-            write_check_file(waiting / WAITING_CHECKS, result, checks, path.name)
+            # 대조표의 원본파일 칸 = 복사본 이름. 승인(app.approval)이 이 이름으로 대조표와 복사본을 짝짓는다
+            write_check_file(waiting / WAITING_CHECKS, result, checks, copy.name)
         except Exception as e:
             if copy.exists():
                 copy.unlink()
@@ -645,10 +651,14 @@ class _Run:
         note = self._note_path(path)
         try:
             note.parent.mkdir(parents=True, exist_ok=True)
-            note.write_text(f"원본: {path}\n사유: {reason}\n\n{RETRY_NOTE}\n", encoding="utf-8")
+            hint = APPROVAL_RETRY_NOTE if self.approving else RETRY_NOTE
+            note.write_text(f"원본: {path}\n사유: {reason}\n\n{hint}\n", encoding="utf-8")
         except OSError as e:
             self.warnings.append(f"경고: 확인필요 사유 파일을 쓰지 못함 ({path.name}): {e}")
-        self._record(path, fp, result, "확인필요")
+        if not self.approving:
+            # 승인 실행에서는 승인대기 상태를 그대로 둔다. 확인필요로 덮으면 다음 날 자동 실행이 입력 폴더의 원본을
+            # 다시 처리해 승인대기에 복사본을 하나 더(_2) 만든다. 복사본은 승인대기에 남아 고친 뒤 다시 승인할 수 있다
+            self._record(path, fp, result, "확인필요")
         self._done(path, "확인필요", reason)
 
     def _done(self, path, outcome, reason):
