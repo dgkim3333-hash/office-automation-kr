@@ -60,7 +60,7 @@
 
 **Interfaces:**
 - Produces:
-  - `JOBS_DIR = "작업"`, `JOB_FILE = "작업설정.yaml"`, `OUTPUT_MODES = ("회사양식", "누적장부", "둘다")`, `JOB_SUBFOLDERS = ("승인대기", "확인필요", "정리문서", "검산")`
+  - `JOBS_DIR = "작업"`, `JOB_FILE = "작업설정.yaml"`, `OUTPUT_MODES = ("회사양식", "누적장부", "둘다")`, `JOB_SUBFOLDERS = ("승인대기", "확인필요", "검산")` (설계 12-1: 정리문서 없음)
   - `@dataclass Job: folder: Path; number: int; title: str; input_dir: Path; output_dir: Path; output_mode: str; run_time: str; scheduler: str = ""; paused: bool = False; approvals: dict[str, int]; fingerprints: dict[str, str]; last_run: str = ""` (last_run = `YYYY-MM-DD`)
   - `Job.rules_path -> Path` (`folder / "규칙.yaml"`), `Job.name -> str` (`folder.name`)
   - `slot_time(number: int) -> str`
@@ -196,44 +196,51 @@ def test_company_form_from_pdf_result(tmp_path)             # PDF 추출 결과(
 - Consumes: W1 `Job`, `save_job`; W2 `verify`, `failed`; W3 `write_check_file`, `read_back`; 기존 `extract`, `read_excel`, `Ledger`, `load_master`, `lookup`, `write_company_form`, `write_extract_result`, `move_review`, `free_name`, `render_filename`, `append_log`, `summary`, `is_locked`
 - Produces:
   - `run_job(job: Job, work: Path, *, now=None, source_dir: Path | None = None, gate=None, on_success=None) -> RunReport` — `source_dir` 기본 = `job.input_dir`(W5 승인은 `승인대기\` 를 넘김). 하위 폴더는 보지 않는다. `on_success(job, result)` 는 출력까지 끝난 건마다 호출(W5 승인 수 세기)
-  - `@dataclass RunReport: counts: dict[str, int]; unmatched_old: int; message: str` — counts 키: `성공` · `중복` · `확인필요` · `승인대기` · `보류`
+  - `@dataclass RunReport: counts: dict[str, int]; unmatched_old: int; message: str; output_files: list[Path]` — counts 키: `성공` · `중복` · `확인필요` · `승인대기` · `보류`
+  - `RunReport.has_news -> bool` (성공 · 중복 · 확인필요 · 승인대기 중 하나라도 > 0 이거나 unmatched_old > 0)
   - `class JobLocked(Exception)`, `job_lock(job) -> contextmanager` (`folder/실행중.lock` 을 열어 `msvcrt.locking(LK_NBLCK)`; 못 잡으면 `JobLocked("이 작업이 이미 실행 중입니다 …")`)
-  - `LEDGER_NAME = "누적장부_{제목}.xlsx"` → 출력 폴더에 둠, `DONE_FILE = "처리한번호.csv"` → 작업 폴더
+  - `LEDGER_NAME = "누적장부_{제목}.xlsx"` → 출력 폴더에 둠
+  - `RECORD_FILE = "처리기록.csv"` → 작업 폴더. 열: `지문,파일,문서종류,번호,상태,규칙지문,날짜` (utf-8-sig)
+  - `file_fingerprint(path) -> str` (내용 sha256 hex), `load_records(job) -> list[dict]`, `rules_fingerprint(job) -> str` (규칙.yaml 바이트 sha256 앞 16자)
   - `gate(job, rules, result) -> bool` : True 면 승인대기로 보냄. 기본값은 항상 False (W5 가 승인 규칙을 넣음)
 
-실행 순서(작업 한 개):
-1. 입력 · 출력 폴더가 없으면 `RunReport(message="입력 폴더가 없습니다: …")` 로 끝(아무것도 안 옮김).
-2. 입력 폴더의 `.pdf` · `.xlsx` (`~$` 제외, 수정 시각 60초 이내 제외, 열려 있으면 보류). `.xls` 는 판별 못 하므로 그대로 둠.
-3. 추출. **판별 실패(doc_type None) 파일은 입력 폴더에 그대로 둔다.** 텍스트 없음 · 번호 미추출 · 읽기 오류는 확인필요.
-4. 중복: `처리한번호.csv` 에 (문서종류, 번호)가 있으면 중복 → 작업 폴더 `정리문서\중복\` 로 이동.
-5. `failed(verify(...))` 가 있으면 확인필요(사유에 항목 나열).
-6. 회사양식 · 둘다: 고객마스터(작업 폴더의 부모 `work / 고객마스터.xlsx`) 조회. 없으면 확인필요(기존 문구). 회사 양식은 엑셀 PO 뿐 아니라 PDF 결과에서도 만든다(설계 10절 2).
-7. `gate(...)` True → 원본을 `승인대기\` 로 옮기고 검산 파일(친구가 볼 대조표)은 `승인대기\대조표\` 에 씀. 끝.
-8. 출력: 누적장부 · 둘다 → 출력 폴더의 `누적장부_{제목}.xlsx` 에 `Ledger` 로 추가 · 저장. 회사양식 · 둘다 → `write_company_form(출력 폴더, …)`. 누적장부만이면 문서별 결과 파일 없음. 저장한 파일마다 `read_back` 이 `[]` 이 아니면: 이번 건을 장부에서 되돌리고(`Ledger.remove` 후 저장) 회사 양식 파일을 지우고 확인필요.
-9. 검산 파일 → 작업 폴더 `검산\`. 원본 → 작업 폴더 `정리문서\{render_filename}` (확장자 유지). `처리한번호.csv` 에 추가. `처리로그.csv`(작업 폴더)에 기록.
-10. `job.last_run = 오늘` 저장. 입력 폴더에 남은 파일 중 수정 시각이 24시간 넘은 것 개수 = `unmatched_old`.
+실행 순서(작업 한 개, 설계 12-1: **원본은 옮기지 않는다**):
+1. 입력 · 출력 폴더가 없으면 `RunReport(message="입력 폴더가 없습니다: …")` 로 끝(아무것도 안 씀).
+2. `source_dir` 의 `.pdf` · `.xlsx` (`~$` 제외, 수정 시각 60초 이내 제외, 열려 있으면 보류). `.xls` 는 판별 못 하므로 건너뜀.
+3. 건너뛰기: 지문이 처리기록에 상태 성공 · 중복 · 승인대기로 있으면 건너뜀(셈에 넣지 않음). 상태 확인필요이면 날짜가 오늘이고 규칙지문이 같을 때만 건너뜀. (W5 승인 실행은 `source_dir=승인대기` 이고 승인대기 기록은 건너뛰지 않음)
+4. 추출. **판별 실패(doc_type None) 파일은 기록하지 않고 그대로 둔다.** 텍스트 없음 · 번호 미추출 · 읽기 오류는 확인필요.
+5. 중복: 지문은 처음인데 (문서종류, 번호)가 처리기록에 성공으로 있으면 상태 중복으로 기록.
+6. `failed(verify(...))` 가 있으면 확인필요(사유에 항목 나열).
+7. 회사양식 · 둘다: 고객마스터(`work / 고객마스터.xlsx`) 조회. 없으면 확인필요(기존 문구). 회사 양식은 엑셀 PO 뿐 아니라 PDF 결과에서도 만든다(설계 10절 2).
+8. `gate(...)` True → 원본 **복사본**을 `승인대기\` 에(`shutil.copy2`, 이름 겹치면 `free_name`), 대조표(검산 파일)는 `승인대기\대조표\` 에. 상태 승인대기로 기록. 끝.
+9. 출력: 누적장부 · 둘다 → 출력 폴더의 `누적장부_{제목}.xlsx` 에 `Ledger` 로 추가 · 저장. 회사양식 · 둘다 → `write_company_form(출력 폴더, …)`. 누적장부만이면 문서별 결과 파일 없음. 저장한 파일마다 `read_back` 이 `[]` 이 아니면: 이번 건을 장부에서 되돌리고(`Ledger.remove` 후 저장) 회사 양식 파일을 지우고 확인필요.
+10. 검산 파일 → 작업 폴더 `검산\`. 상태 성공으로 기록. `on_success` 호출.
+11. 확인필요는 작업 폴더 `확인필요\{원본이름}.txt` 에 원본 경로 · 사유만(원본 복사 없음).
+12. `job.last_run = 오늘` 저장. `unmatched_old` = 입력 폴더 파일 중 수정 시각 24시간 넘었고, **같은 입력 폴더를 쓰는 모든 작업**의 처리기록 어디에도 지문이 없는 것의 개수. `RunReport.output_files` 에 이번에 만든 결과 파일 경로들.
 
 - [ ] **Step 1: 실패하는 테스트** (샘플 PDF · 엑셀 · 예시 규칙 · 예시 고객마스터를 임시 작업에 복사)
 
 ```python
-def test_runs_only_detected_files_and_leaves_others(tmp_path)   # 서신 PDF 는 입력 폴더에 그대로, Invoice 는 정리문서로
+def test_runs_only_detected_files_and_leaves_others(tmp_path)   # 서신 · Invoice 모두 입력 폴더에 그대로, Invoice 만 처리기록에 성공
+def test_second_run_skips_processed_even_if_renamed(tmp_path)   # 같은 파일 이름 바꿔 다시 넣어도 counts 전부 0, has_news False
+def test_review_file_retried_next_day_or_after_rule_change(tmp_path)  # now=같은 날 → 건너뜀, 다음 날 → 다시 시도, 규칙.yaml 바꾸면 같은 날도 다시
+def test_new_file_with_same_number_is_duplicate(tmp_path)       # 내용 다른 파일 · 같은 인보이스번호 → counts["중복"] == 1, 출력 없음
 def test_mode_ledger_only_writes_ledger_and_no_company_file(tmp_path)
 def test_mode_company_only_writes_company_file_and_no_ledger(tmp_path)
 def test_mode_both_from_excel_po(tmp_path)                       # 회사양식 파일 1개 + 누적장부 PO 시트 1줄
 def test_company_form_from_pdf_po_when_mode_company(tmp_path)    # PDF PO(픽스처) → 회사양식 파일
 def test_verify_failure_goes_to_review_and_nothing_written(tmp_path)   # verify 를 실패하게 monkeypatch → 확인필요, 출력 폴더 비어 있음
 def test_read_back_mismatch_rolls_back(tmp_path)                 # read_back 이 ["…"] 를 돌려주게 → 확인필요, 장부 줄 없음, 회사 파일 없음
-def test_duplicate_number_moves_to_duplicate_folder(tmp_path)
-def test_gate_true_sends_to_waiting_with_check_file(tmp_path)
+def test_gate_true_copies_to_waiting_with_check_file(tmp_path)   # 원본은 입력 폴더에 그대로, 복사본 + 대조표
 def test_file_modified_within_a_minute_is_left_for_next_run(tmp_path)
 def test_missing_output_folder_stops_without_moving(tmp_path)
 def test_second_run_while_locked_exits_with_message(tmp_path)    # job_lock 안에서 run_job → JobLocked
 def test_two_jobs_sharing_input_folder_take_their_own_files(tmp_path)  # 작업1 규칙=Invoice만, 작업2=DM만
-def test_unmatched_old_file_is_counted(tmp_path)                 # os.utime 으로 25시간 전
+def test_unmatched_old_file_is_counted(tmp_path)                 # os.utime 으로 25시간 전, 다른 작업이 처리한 파일은 세지 않음
 ```
 
 - [ ] **Step 2: 실행해 실패 확인** — `uv run pytest tests/test_job_run.py tests/test_e2e_jobs.py -q`
-- [ ] **Step 3: 구현** — 기존 `__main__.run` · `_plan` · `_move` · `_write_output` 의 순서와 예외 처리 습관(한 건 오류가 나머지를 막지 않음, 장부 저장이 된 뒤에만 이동, 이동은 `os.rename`)을 그대로 따른다.
+- [ ] **Step 3: 구현** — 기존 `__main__.run` · `_plan` · `_write_output` 의 예외 처리 습관(한 건 오류가 나머지를 막지 않음, 장부 저장이 된 뒤에만 기록 · 출력)을 따른다. 입력 폴더의 원본은 읽기만 한다(이동 · 이름 바꾸기 · 삭제 금지 — 테스트로 확인).
 - [ ] **Step 4: 통과 확인** — `uv run pytest -q`
 - [ ] **Step 5: 커밋** — `W4 작업 실행`
 
@@ -252,8 +259,8 @@ def test_unmatched_old_file_is_counted(tmp_path)                 # os.utime 으�
   - `form_key(result) -> str` (엑셀이면 `result.source_form`, 아니면 `result.doc_type.name`)
   - `form_fingerprint(rules_path: Path, key: str) -> str` — 규칙.yaml 을 yaml 로 읽어 그 양식에 해당하는 부분(엑셀양식이면 그 엑셀양식 + 연결된 문서종류, 아니면 그 문서종류) + `회사양식` 을 `yaml.safe_dump(sort_keys=True)` 한 글자의 sha256 앞 16자
   - `approval_gate(job, rules, result) -> bool` — 지문이 저장된 값과 다르면 그 양식만 승인 수 0 + 새 지문 저장. 승인 수 < 10 이면 True
-  - `approve(job, work) -> RunReport` — `run_job(job, work, source_dir=job.folder/"승인대기", gate=lambda *a: False, on_success=…)`: 지금 규칙으로 다시 추출 · 검산해 출력까지 보내고, 성공한 건마다 그 양식 승인 수 +1, `승인대기\대조표\` 의 그 문서 대조표 삭제. 승인대기가 비었으면 `message="승인할 문서가 없습니다."`
-  - 친구가 틀린 문서를 승인하지 않으려면 승인 전에 그 파일을 `확인필요\` 로 옮긴다(06장에 적음).
+  - `approve(job, work) -> RunReport` — `run_job(job, work, source_dir=job.folder/"승인대기", gate=lambda *a: False, on_success=…)`: 지금 규칙으로 다시 추출 · 검산해 출력까지 보내고, 성공한 건마다 그 양식 승인 수 +1, 그 복사본과 `승인대기\대조표\` 의 대조표 삭제(처리기록의 그 지문은 성공으로 바뀜). 승인대기가 비었으면 `message="승인할 문서가 없습니다."`
+  - 친구가 틀린 문서를 승인하지 않으려면 승인 전에 `승인대기\` 의 그 복사본을 지운다(06장에 적음).
 
 - [ ] **Step 1: 실패하는 테스트**
 
@@ -285,8 +292,8 @@ def test_approve_rechecks_and_rejects_bad_file(tmp_path)  # 승인대기 파일�
   - `job new --제목 T --입력 DIR --출력 DIR --방식 회사양식|누적장부|둘다` → 작업 생성, 작업 폴더에 예시 규칙 복사 대신 **빈 뼈대 규칙**(`rules/규칙.뼈대.yaml`: 주석으로 구조 안내 + 비어 있는 `문서종류: {}` 가 아니라 Claude 가 채울 자리. load 시 RuleError 가 나도 job new 는 성공) 을 둔다. 마지막 줄 출력 `작업 만듦: 01_제목 (매일 16:00)`.
   - `job list` → 번호 · 제목 · 시각 · 실행 방법(scheduler) · 승인 현황(`ACME 3/10`).
   - `job delete N` · `job pause N` · `job resume N` (W7 의 등록 해제 · 재등록 호출)
-  - `run N [--자동]` → `run_job` + `approval_gate`. `--자동` 이면 결과를 작업 폴더 `실행기록.txt` 에 덧붙이고, 확인필요 · 승인대기 · unmatched_old 가 있으면 W7 `notify`.
-  - `approve N` → `approve`
+  - `run N [--자동]` → `run_job` + `approval_gate`. 결과를 작업 폴더 `실행기록.txt` 에 덧붙이고, `report.has_news` 이면 W7 `notify_report(job, report)` (자동 · 지금 실행 모두. 설계 12-2). W7 전에는 `notify_report` 자리에 아무것도 하지 않는 함수.
+  - `approve N` → `approve` + 같은 알림
   - `check FILE --작업 N` → 그 작업 규칙으로 기존 check 표 + 검산 결과 표(`| 검산 | 원본 | 결과 | 일치 |`)
   - `pick-folder "안내 글"` → 폴더 선택 창, 고른 경로를 한 줄 출력(로컬 아니면 오류 문구, 취소면 `취소함`)
   - `catch-up` → W7
@@ -315,9 +322,9 @@ def test_old_inbox_flow_is_gone()                        # config 에 INBOX 없�
 ### Task W7: 매일 실행 등록 · 바로가기 · 놓친 실행 · 알림
 
 **Files:**
-- Create: `app/shortcuts.py`, `app/schedule.py`
+- Create: `app/shortcuts.py`, `app/schedule.py`, `app/notify.py`
 - Modify: `app/__main__.py` (job new 끝에 등록 + 바로가기, delete/pause/resume, catch-up)
-- Test: `tests/test_schedule.py`, `tests/test_shortcuts.py`
+- Test: `tests/test_schedule.py`, `tests/test_shortcuts.py`, `tests/test_notify.py`
 
 **Interfaces:**
 - Consumes: W1 `Job`, `list_jobs`, `save_job`; W6 명령
@@ -330,7 +337,7 @@ def test_old_inbox_flow_is_gone()                        # config 에 INBOX 없�
   - `schedule.unregister(job, run=...) -> None`, `pause` · `resume`
   - `schedule.due_jobs(jobs, now: datetime) -> list[Job]` — paused 아님 · `last_run != 오늘` · `run_time <= now` · 번호 순
   - `schedule.catch_up(work, now=None, runner=None) -> list[str]` — due_jobs 를 차례로 실행(동시에 아님). 잠긴 작업은 건너뜀
-  - `schedule.notify(title: str, text: str, box=None) -> None` — 기본은 `ctypes.windll.user32.MessageBoxW`. 잠금을 푼 뒤 호출
+  - `notify.py` (새 파일): `report_text(job, report) -> str` (예: `"일일 PO 정리: 결과 3건, 확인필요 1건"`, 0인 항목은 뺌, 어느 작업에도 맞지 않는 파일 N개 포함), `notify_report(job, report, toast=None, box=None) -> None` — `has_news` 가 False 면 아무것도 안 함. 기본 toast = PowerShell 의 WinRT `Windows.UI.Notifications.ToastNotificationManager`(외부 모듈 없음), 클릭 = 출력 폴더 열기(결과 0건이면 작업 폴더). toast 가 실패하면 `ctypes.windll.user32.MessageBoxW`. 잠금을 푼 뒤 호출
 - 작업 스케줄러 · 시작프로그램 바로가기는 사용자가 지우거나 PC 를 옮겨도 `job new` 를 다시 돌리지 않고 복구되도록 `job repair` 명령(모든 작업 다시 등록 · 바로가기 다시 만듦)도 둔다.
 
 - [ ] **Step 1: 실패하는 테스트** (`run` 에 가짜 실행기를 넣어 PowerShell 명령 글자와 반환 코드를 흉내)
@@ -343,6 +350,9 @@ def test_job_shortcuts_names_and_args(tmp_path)                  # "지금 실�
 def test_due_jobs_skips_done_paused_and_future()
 def test_catch_up_runs_missed_jobs_in_order_once(tmp_path)       # 16:00·16:20 지났고 17:00 안 지남 → 1,2 차례로, 다시 부르면 0개
 def test_job_new_prints_which_method_was_used(tmp_path, capsys)  # "자동 실행: Windows 작업 스케줄러 (매일 16:00)" 또는 대체 문구
+def test_report_text_skips_zero_counts()                         # counts 성공 3, 확인필요 1 → "일일 PO 정리: 결과 3건, 확인필요 1건"
+def test_no_notification_when_nothing_new()                      # has_news False → toast · box 둘 다 호출 0
+def test_toast_failure_falls_back_to_message_box()
 ```
 
 - [ ] **Step 2~4:** 실패 확인 → 구현 → `uv run pytest -q`
@@ -370,7 +380,7 @@ def test_job_new_prints_which_method_was_used(tmp_path, capsys)  # "자동 실�
 
 **CLAUDE.md 바뀌는 점:** 작업 만들기 때 친구가 준 예시 파일(원본) 1개와 회사 양식 파일만 연다. 그 외 작업 폴더 파일 · 입력 · 출력 폴더 · 고객마스터 · 누적장부 · 승인대기는 열지 않는다. `run` · `approve` · `catch-up` 은 실행하지 않는다(친구가 바탕화면으로). 고칠 것은 그 작업의 규칙.yaml 뿐.
 
-**문서:** 01장 데이터 경계 표에 「작업 만들 때 원본 1개가 Claude 에게 감」. 04장 = 작업 만들기(시작 문장 · 질문 순서 · 끝나면 바탕화면). 05장 = 규칙 고치기 · 「○○ 작업에 이 고객 양식 더해 줘」(새 양식은 다시 10건 승인). 06장 = 매일 4시 · 지금 실행 · 승인 · 확인필요 · 「어느 작업에도 맞지 않는 파일」. 07장 = 왜 Claude 예정됨이 아니라 Windows 작업인지. 99장 = 자동 실행이 「시작프로그램」 · 「없음」으로 나올 때, IT 담당자에게 물어볼 문장, 검산 불일치 사유 읽는 법.
+**문서:** 01장 데이터 경계 표에 「작업 만들 때 원본 1개가 Claude 에게 감」. 04장 = 작업 만들기(시작 문장 · 질문 순서 · 끝나면 바탕화면). 05장 = 규칙 고치기 · 「○○ 작업에 이 고객 양식 더해 줘」(새 양식은 다시 10건 승인). 06장 = 매일 4시 · 지금 실행 · 결과 알림 · 승인(틀린 건 승인대기 복사본을 지움) · 확인필요 · 원본은 입력 폴더에 그대로(이미 처리한 것은 건너뜀, 정리는 친구가 원할 때) · 「어느 작업에도 맞지 않는 파일」. 07장 = 왜 Claude 예정됨이 아니라 Windows 작업인지. 99장 = 자동 실행이 「시작프로그램」 · 「없음」으로 나올 때, IT 담당자에게 물어볼 문장, 검산 불일치 사유 읽는 법.
 
 - [ ] **Step 1: 실패하는 테스트**
 
