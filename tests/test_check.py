@@ -72,3 +72,42 @@ def test_without_init_says_run_setup(tmp_path, capsys):
     code = main(["check", str(SAMPLES / "INV-2026-10231.pdf")], repo_root=tmp_path)
     assert code == 1
     assert "설치.bat를 먼저 실행하세요" in capsys.readouterr().out
+
+
+# --- 엑셀 PO 도 check 로 본다 ---
+
+ORDERS = REPO / "samples" / "01_고객오더_엑셀"
+
+
+def test_check_excel_shows_head_items_master_and_form(setup, capsys):
+    repo, work = setup
+    before = _snapshot(work)
+    code = main(["check", str(ORDERS / "고객오더_ACME_PO-ACME-2026-0417.xlsx")], repo_root=repo)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "엑셀양식: ACME" in out
+    assert "| 고객PO번호 | PO-ACME-2026-0417 |" in out
+    assert "| 발주일 | 2026-09-18 |" in out
+    assert "품목 4줄" in out
+    assert "| 1 | VTS-CDU-300 |" in out
+    assert "고객마스터: 찾음 (고객코드 C-KR-0417)" in out
+    assert "회사 양식: 회사양식_SO입력_PO-ACME-2026-0417.xlsx (4줄)" in out
+    assert _snapshot(work) == before  # 아무것도 만들거나 옮기지 않음
+
+
+def test_check_excel_unknown_customer_says_so(setup, capsys):
+    repo, work = setup
+    import openpyxl
+    wb = openpyxl.load_workbook(work / "고객마스터.xlsx")
+    wb.active.delete_rows(2, 2)
+    wb.save(work / "고객마스터.xlsx")
+    main(["check", str(ORDERS / "고객오더_HANIL_HDC-PUR-26-0908.xlsx")], repo_root=repo)
+    assert "고객마스터: 없음" in capsys.readouterr().out
+
+
+def test_check_old_xls_explains(setup, capsys, tmp_path):
+    repo, _ = setup
+    old = tmp_path / "옛주문.xls"
+    old.write_bytes(b"old")
+    main(["check", str(old)], repo_root=repo)
+    assert ".xlsx" in capsys.readouterr().out

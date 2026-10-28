@@ -22,7 +22,9 @@ from app.log import append_log, summary
 from app.master import MasterError, load_master, lookup
 from app.outlook import collect_from_outlook
 from app.outputs import write_company_form, write_extract_result
-from app.organize import free_name, move_duplicate, move_review, move_success, render_filename, target_path
+from app.organize import (
+    free_name, move_duplicate, move_review, move_success, render_filename, render_text, target_path,
+)
 from app.rules import RuleError, load_rules
 
 LOCKED_MESSAGE = (
@@ -271,7 +273,7 @@ def _dispatch(args, repo_root) -> int:
             if not args.target:
                 print("검사할 PDF 경로를 적어 주세요. 예: uv run python -m app check 받은문서\\샘플.pdf")
                 return 1
-            return check(Path(args.target), rules)
+            return check(Path(args.target), rules, work)
         return run(work, rules, overwrite=args.overwrite)
     except (config.ConfigError, InitError, LocalOnlyError) as e:
         print(e)
@@ -293,18 +295,24 @@ def _cell(text):
     return str(text).replace("|", "\\|")
 
 
-def check(pdf: Path, rules) -> int:
+def check(pdf: Path, rules, work: Path | None = None) -> int:
     if not pdf.is_file():
         print(f"파일이 없습니다: {pdf}")
         return 1
-    result = extract(pdf, rules)
+    if pdf.suffix.lower() == ".xls":
+        print(XLS_REASON)
+        return 0
+    is_excel = pdf.suffix.lower() == ".xlsx"
+    result = read_excel(pdf, rules) if is_excel else extract(pdf, rules)
     print(f"파일: {pdf.name}")
     print(f"문서종류: {result.doc_type.name if result.doc_type else '(판별 실패)'}")
+    if result.source_form:
+        print(f"엑셀양식: {result.source_form}")
 
     if result.review_reason and (result.doc_type is None or not result.has_text):
         print(f"\n확인필요: {result.review_reason}")
         if result.text_head:
-            print("\n--- 1쪽 텍스트 앞 30줄 ---")
+            print("\n--- 앞부분 글자(30줄) ---")
             print(result.text_head)
         return 0
 
@@ -317,25 +325,51 @@ def check(pdf: Path, rules) -> int:
         notes += [w for w in result.warnings if f"'{name}' 값" in w]
         print(f"| {_cell(name)} | {_cell(_show(value))} | {_cell(', '.join(notes))} |")
 
-    table = result.doc_type.table
-    if table is not None:
+    columns = _item_columns(result, rules)
+    if columns:
         if result.table is None:
             print("\n품목 표: 읽지 못함 (아래 경고 참고)")
         else:
             print(f"\n품목 {len(result.table)}줄")
-            print("| " + " | ".join(table.columns) + " |")
-            print("|" + "---|" * len(table.columns))
+            print("| " + " | ".join(columns) + " |")
+            print("|" + "---|" * len(columns))
             for row in result.table:
-                print("| " + " | ".join(_cell(row.get(c, "")) for c in table.columns) + " |")
+                print("| " + " | ".join(_cell(_show(row.get(c, ""))) for c in columns) + " |")
 
     others = [w for w in result.warnings if "' 못 찾음" not in w and "' 값 " not in w]
     for w in others:
         print(f"경고: {w}")
     if result.review_reason:
         print(f"\n확인필요: {result.review_reason}")
-    else:
-        print(f"\n정리될 경로: {config.ORGANIZED}\\{render_filename(result)}")
+        return 0
+    organized = render_filename(result).with_suffix(pdf.suffix.lower())
+    print(f"\n정리될 경로: {config.ORGANIZED}\\{organized}")
+    if result.source_form and rules.company_form is not None:
+        _check_company_form(result, rules, work)
     return 0
+
+
+def _item_columns(result, rules):
+    if result.source_form:
+        form = next(f for f in rules.excel_forms if f.name == result.source_form)
+        return list(form.items.columns) if form.items else []
+    return result.doc_type.table.columns if result.doc_type.table else []
+
+
+def _check_company_form(result, rules, work):
+    """엑셀 PO: 고객마스터에서 고객을 찾았는지, 회사 양식이 몇 줄로 만들어질지."""
+    customer = result.fields.get("고객명")
+    row = None
+    try:
+        row = lookup(load_master(work / config.MASTER_FILE), customer) if work else None
+    except MasterError as e:
+        print(f"고객마스터: {e}")
+    if row is not None:
+        print(f"고객마스터: 찾음 (고객코드 {row.get('고객코드')})")
+    else:
+        print(f"고객마스터: 없음 ('{customer}' 줄을 고객마스터.xlsx 에 더해야 회사 양식이 만들어집니다)")
+    name = render_text(rules.company_form.filename_tpl, result.fields)
+    print(f"회사 양식: {name} ({len(result.table or [])}줄)")
 
 
 if __name__ == "__main__":

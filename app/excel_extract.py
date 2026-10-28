@@ -123,15 +123,15 @@ def read_excel(path, rules) -> ExtractResult:
     lines = _sheet_lines(ws, max(DETECT_ROWS, HEAD_LINES))
     head_text = "\n".join(lines[:HEAD_LINES])
     if not lines:
-        return ExtractResult(doc_type=None, has_text=False)
+        return ExtractResult(doc_type=None, has_text=False, is_excel=True)
 
     detect = "\n".join(lines[:DETECT_ROWS]).lower()
     form = next((f for f in rules.excel_forms if any(k.lower() in detect for k in f.keywords)), None)
     if form is None:
-        return ExtractResult(doc_type=None, text_head=head_text)
+        return ExtractResult(doc_type=None, text_head=head_text, is_excel=True)
 
     doc_type = rules.get(form.doc_type)
-    result = ExtractResult(doc_type=doc_type, text_head=head_text, source_form=form.name)
+    result = ExtractResult(doc_type=doc_type, text_head=head_text, source_form=form.name, is_excel=True)
     for name, cell in form.head.items():
         value, found = _head_value(ws, cell.where)
         if not found:

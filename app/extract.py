@@ -21,12 +21,15 @@ class ExtractResult:
     warnings: list[str] = field(default_factory=list)
     has_text: bool = True
     source_form: str | None = None  # 엑셀 PO 면 엑셀양식 이름(고객), PDF 면 None
+    is_excel: bool = False
 
     @property
     def review_reason(self) -> str | None:
         """확인필요로 보낼 사유. 정상이면 None."""
         if not self.has_text:
             return NO_TEXT
+        if self.doc_type is None and self.is_excel:
+            return "판별 실패 (규칙.yaml 의 엑셀양식 중 맞는 고객이 없음. 05장대로 이 고객의 엑셀 양식을 가르치세요)"
         if self.doc_type is None:
             return "판별 실패 (판별키워드가 하나도 없음)"
         if self.missing_required:

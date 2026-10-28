@@ -137,3 +137,12 @@ def test_excel_lock_file_is_ignored(env, capsys):
     assert main([], repo_root=repo) == 0
     assert (work / "받은문서" / "~$주문.xlsx").exists()
     assert "없습니다" in capsys.readouterr().out
+
+
+def test_unknown_excel_review_note_points_to_teaching(env, capsys):
+    repo, work = env
+    name = "회사양식_SO입력_HDC-PUR-26-0908.xlsx"  # 고객 PO 양식이 아닌 엑셀
+    shutil.copy(SAMPLES / "02_회사양식_변환" / name, work / "받은문서" / name)
+    main([], repo_root=repo)
+    note = (work / "확인필요" / "회사양식_SO입력_HDC-PUR-26-0908.txt").read_text(encoding="utf-8")
+    assert "엑셀양식" in note and "05장" in note
