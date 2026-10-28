@@ -55,7 +55,7 @@ def _document(path, title, number_line, items):
     c.setFont("Helvetica-Bold", 20)
     c.drawString(72, 720, title)
     c.setFont("Helvetica", 11)
-    c.drawString(72, 690, "ACME Cooling Systems Inc.")
+    c.drawString(72, 690, "ACME Supply Inc.")
     c.drawString(72, 660, number_line)
     c.drawString(72, 645, f"Date: {DATE}")
     c.drawString(72, 630, f"Bill To: {CUSTOMER}")
@@ -87,7 +87,7 @@ def _letter(path):
     c = _new_canvas(path)
     c.setFont("Helvetica", 11)
     lines = [
-        "ACME Cooling Systems Inc.",
+        "ACME Supply Inc.",
         "",
         "Dear Customer,",
         "Thank you for visiting our booth at the trade show.",
