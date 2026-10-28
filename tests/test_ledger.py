@@ -45,7 +45,7 @@ def _add(ledger, pdf, rules, when=datetime(2026, 10, 28, 9, 0)):
 def test_new_ledger_has_five_sheets_and_headers(book, rules):
     Ledger.open(book, rules).save()
     wb = openpyxl.load_workbook(book)
-    assert wb.sheetnames == ["DM", "Invoice", "PO", "품목", "처리로그"]  # 규칙 순서
+    assert wb.sheetnames == ["Invoice", "DM", "PO", "품목", "처리로그"]  # 규칙의 시트순서
     assert _header(wb["Invoice"]) == INVOICE_HEAD
     assert _header(wb["품목"]) == ["문서종류", "문서번호", "줄", "품번", "품명", "수량", "단가", "금액"]
     assert _header(wb["처리로그"]) == ["일시", "파일", "결과", "사유"]
@@ -152,3 +152,50 @@ def test_locked_on_save(book, rules):
         with pytest.raises(LedgerLocked):
             ledger.save()
     assert len(_data_rows(openpyxl.load_workbook(book)["Invoice"])) == 0
+
+
+# --- 보기 좋게: 열 너비 자동 맞춤, 탭 순서 ---
+
+def _width(ws, header):
+    from openpyxl.utils import get_column_letter
+    col = [c.value for c in ws[1]].index(header) + 1
+    return ws.column_dimensions[get_column_letter(col)].width or 0
+
+
+def test_columns_are_widened_to_fit_content(book, rules):
+    ledger = Ledger.open(book, rules)
+    _add(ledger, INVOICE, rules)
+    ledger.save()
+    ws = openpyxl.load_workbook(book)["Invoice"]
+    assert _width(ws, "고객명") >= len("ACME Semiconductor Korea Co., Ltd.")
+    assert _width(ws, "정리된경로") <= 60  # 너무 넓어지지 않음
+    assert _width(ws, "발행일") >= 10
+
+
+def test_manual_wider_column_is_not_shrunk(book, rules):
+    Ledger.open(book, rules).save()
+    wb = openpyxl.load_workbook(book)
+    wb["Invoice"].column_dimensions["A"].width = 50
+    wb.save(book)
+    Ledger.open(book, rules).save()
+    assert openpyxl.load_workbook(book)["Invoice"].column_dimensions["A"].width == 50
+
+
+def test_sheet_tabs_follow_sheet_order_and_open_on_first(book, rules):
+    Ledger.open(book, rules).save()
+    wb = openpyxl.load_workbook(book)
+    assert wb.sheetnames == ["Invoice", "DM", "PO", "품목", "처리로그"]
+    assert wb.active.title == "Invoice"
+    assert [ws.title for ws in wb.worksheets if ws.sheet_view.tabSelected] == ["Invoice"]
+
+
+def test_existing_ledger_tabs_are_reordered_but_user_sheet_stays(book, rules):
+    import copy
+    old = copy.deepcopy(rules)
+    old.sheet_order = ["DM", "Invoice", "PO"]  # 예전 판 장부(DM 이 앞)
+    Ledger.open(book, old).save()
+    wb = openpyxl.load_workbook(book)
+    wb.create_sheet("내계산", 0)  # 사용자가 맨 앞에 만든 시트
+    wb.save(book)
+    Ledger.open(book, rules).save()
+    assert openpyxl.load_workbook(book).sheetnames == ["내계산", "Invoice", "DM", "PO", "품목", "처리로그"]

@@ -1,7 +1,7 @@
 """규칙.yaml 을 읽고, 쓰기 전에 구조를 검증한다."""
 import re
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -42,7 +42,8 @@ class DocType:
 
 @dataclass
 class Rules:
-    doc_types: list[DocType]
+    doc_types: list[DocType]  # 판별 순서
+    sheet_order: list[str] = field(default_factory=list)  # 장부 탭 순서(판별 순서와 따로)
 
     def get(self, name):
         return next((d for d in self.doc_types if d.name == name), None)
@@ -60,7 +61,21 @@ def load_rules(path) -> Rules:
     if not isinstance(data, dict) or not isinstance(data.get("문서종류"), dict) or not data["문서종류"]:
         raise RuleError("규칙 파일 맨 위에 '문서종류:' 와 그 아래 종류가 하나 이상 있어야 합니다.")
 
-    return Rules([_doc_type(str(name), body) for name, body in data["문서종류"].items()])
+    doc_types = [_doc_type(str(name), body) for name, body in data["문서종류"].items()]
+    return Rules(doc_types, _sheet_order(data.get("시트순서"), [d.name for d in doc_types]))
+
+
+def _sheet_order(spec, names) -> list[str]:
+    """장부 탭 순서. 적힌 종류 먼저, 빠진 종류는 판별 순서대로 뒤에 붙인다."""
+    if spec is None:
+        return list(names)
+    if not isinstance(spec, list):
+        raise RuleError("시트순서는 [Invoice, DM] 처럼 적어야 합니다.")
+    order = [str(n) for n in spec]
+    for n in order:
+        if n not in names:
+            raise RuleError(f"시트순서의 '{n}' 가 문서종류에 없습니다.")
+    return order + [n for n in names if n not in order]
 
 
 def _doc_type(name, body) -> DocType:

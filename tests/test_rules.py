@@ -91,3 +91,26 @@ def test_unknown_format_raises(tmp_path):
     path = _broken(tmp_path, lambda d: d["필드"]["합계금액"].update(형식="원화"))
     with pytest.raises(RuleError, match="원화"):
         load_rules(path)
+
+
+def test_sheet_order_from_rules():
+    rules = load_rules(EXAMPLE)
+    assert rules.sheet_order == ["Invoice", "DM", "PO"]
+    assert [d.name for d in rules.doc_types] == ["DM", "Invoice", "PO"]  # 판별 순서는 그대로
+
+
+def test_sheet_order_unknown_type_raises(tmp_path):
+    data = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    data["시트순서"] = ["Invoice", "없는종류"]
+    path = tmp_path / "규칙.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(RuleError, match="없는종류"):
+        load_rules(path)
+
+
+def test_sheet_order_missing_types_are_appended(tmp_path):
+    data = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    data["시트순서"] = ["PO"]
+    path = tmp_path / "규칙.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    assert load_rules(path).sheet_order == ["PO", "DM", "Invoice"]

@@ -2,6 +2,7 @@
 import os
 import shutil
 import sys
+import unicodedata
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,7 @@ DATETIME_FORMAT = "yyyy-mm-dd hh:mm:ss"
 DATE_FORMAT = "yyyy-mm-dd"
 AMOUNT_FORMAT = "#,##0.00"
 TABLE_PREFIX = "Ledger_"
+MIN_WIDTH, MAX_WIDTH = 10, 60  # 열 너비(글자 수)
 
 
 class LedgerLocked(Exception):
@@ -87,6 +89,19 @@ class Ledger:
                     item_columns.append(col)
         _ensure_columns(self.wb[ITEMS_SHEET], item_columns)
         _ensure_columns(self.wb[LOG_SHEET], LOG_COLUMNS)
+        self._order_doc_sheets()
+
+    def _sheet_order(self):
+        return self.rules.sheet_order or [d.name for d in self.rules.doc_types]
+
+    def _order_doc_sheets(self):
+        """문서종류 시트를 시트순서대로 놓는다. 자리만 서로 바꾸므로 사용자가 만든 시트는 그대로다."""
+        order = self._sheet_order()
+        sheets = self.wb._sheets
+        slots = sorted(i for i, ws in enumerate(sheets) if ws.title in order)
+        ordered = [self.wb[name] for name in order]  # 자리를 바꾸기 전에 먼저 모두 잡아 둔다
+        for i, ws in zip(slots, ordered):
+            sheets[i] = ws
 
     # --- 조회·추가·삭제 ---
 
@@ -145,6 +160,11 @@ class Ledger:
                 del ws.tables[name]
         for i, ws in enumerate(self._managed_sheets()):
             _refresh_table(ws, f"{TABLE_PREFIX}{i + 1}")
+            _fit_columns(ws)
+        first = self.wb[self._sheet_order()[0]]  # 열면 맨 앞 문서종류 탭이 보이게
+        self.wb.active = self.wb.worksheets.index(first)
+        for ws in self.wb.worksheets:
+            ws.sheet_view.tabSelected = ws is first
         tmp = self.path.with_name(f".{self.path.stem}.tmp.xlsx")
         backup = self.path.with_name(f"{self.path.stem}.bak{self.path.suffix}")
         try:
@@ -157,6 +177,29 @@ class Ledger:
         finally:
             if tmp.exists():
                 tmp.unlink()
+
+
+def _display_width(value) -> int:
+    """엑셀에서 보이는 글자 폭(한글 등 넓은 글자는 2)."""
+    if value is None:
+        return 0
+    if isinstance(value, datetime):
+        return 19
+    if isinstance(value, date):
+        return 10
+    if isinstance(value, (int, float, Decimal)):
+        return len(f"{value:,.2f}")
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(value))
+
+
+def _fit_columns(ws):
+    """내용에 맞춰 열을 넓힌다(최소 10, 최대 60). 사용자가 더 넓혀 둔 열은 줄이지 않는다."""
+    for cells in ws.iter_cols(min_row=1, max_row=_last_row(ws)):
+        need = max(_display_width(c.value) for c in cells) + 4  # 필터 단추 자리
+        need = min(max(need, MIN_WIDTH), MAX_WIDTH)
+        dim = ws.column_dimensions[cells[0].column_letter]
+        if need > (dim.width or 0):
+            dim.width = need
 
 
 def _new_workbook():
