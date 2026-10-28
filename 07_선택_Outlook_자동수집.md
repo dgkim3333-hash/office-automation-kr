@@ -31,7 +31,13 @@
 
 저장소 폴더의 **`수집.bat` 을 두 번 클릭**합니다. 처음 한 번은 필요한 부품(pywin32)을 내려받느라 조금 걸립니다.
 
-미리 설치해 두고 싶으면 저장소 폴더의 PowerShell 에서 아래를 실행합니다. `Installed` 가 보이면 정상입니다(안 해도 `수집.bat` 이 알아서 합니다).
+미리 설치해 두고 싶으면(안 해도 `수집.bat` 이 알아서 합니다) PowerShell 에서 먼저 저장소 폴더로 갑니다. 프롬프트가 `PS C:\dev\office-automation-kr-main>` 으로 바뀌면 정상입니다.
+
+```powershell
+cd C:\dev\office-automation-kr-main
+```
+
+부품을 설치합니다. 끝에 `Installed` 또는 `Audited`(이미 설치됨)가 보이면 정상입니다.
 
 ```powershell
 uv sync --extra outlook
@@ -53,4 +59,4 @@ uv sync --extra outlook
 
 ---
 
-다음 → [99 · 막혔을 때](99_막혔을_때.md)
+다음 → [08 · 엑셀 PO 변환 (예정)](08_선택_엑셀PO변환.md)
