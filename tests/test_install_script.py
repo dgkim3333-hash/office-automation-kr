@@ -118,3 +118,61 @@ def test_global_template_rules():
     for must in ("한국어", "허락", "Cowork", "Code 탭", "office-automation-kr-main"):
         assert must in text, must
     assert not TEMPLATE.read_bytes().startswith(b"\xef\xbb\xbf")
+
+# --- 설치 방법 차례로 시도(실패 흉내). 실제 설치는 하지 않는다 ---
+
+def _run_functions(ps_code):
+    """install.ps1 의 함수만 불러와(OA_INSTALL_FUNCTIONS_ONLY) ps_code 를 실행하고 출력 글자를 돌려준다."""
+    command = (
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $env:OA_INSTALL_FUNCTIONS_ONLY = '1'; "
+        f". ([scriptblock]::Create([IO.File]::ReadAllText('{SCRIPT}', [Text.Encoding]::UTF8))); "
+        + ps_code
+    )
+    proc = subprocess.run(PS + ["-Command", command], capture_output=True, timeout=120)
+    return proc.stdout.decode("utf-8", "replace") + proc.stderr.decode("utf-8", "replace")
+
+
+def test_next_method_is_tried_when_first_throws():
+    out = _run_functions(
+        "$global:calls = @(); $global:ok = $false; "
+        "$m = [ordered]@{ 'm1' = { $global:calls += 'm1'; throw '막힘' }; "
+        "'m2' = { $global:calls += 'm2'; $global:ok = $true }; 'm3' = { $global:calls += 'm3' } }; "
+        "$r = Invoke-FirstWorking '시험' $m { $global:ok }; "
+        "'RESULT=' + $r + ' CALLS=' + ($global:calls -join ',')"
+    )
+    assert "RESULT=m2 CALLS=m1,m2" in out, out
+
+
+def test_next_method_is_tried_when_first_finishes_but_tool_missing():
+    # 명령은 끝났는데 uv 가 안 보이는 경우(예: PATH 미반영)도 다음 방법으로 넘어간다
+    out = _run_functions(
+        "$global:calls = @(); $global:ok = $false; "
+        "$m = [ordered]@{ 'm1' = { $global:calls += 'm1' }; 'm2' = { $global:calls += 'm2'; $global:ok = $true } }; "
+        "$r = Invoke-FirstWorking '시험' $m { $global:ok }; "
+        "'RESULT=' + $r + ' CALLS=' + ($global:calls -join ',')"
+    )
+    assert "RESULT=m2 CALLS=m1,m2" in out, out
+
+
+def test_all_methods_failing_stops_with_message():
+    out = _run_functions(
+        "$m = [ordered]@{ 'm1' = { throw 'a' }; 'm2' = { throw 'b' } }; "
+        "try { Invoke-FirstWorking '시험도구' $m { $false } } catch { 'THROWN=' + $_.Exception.Message }"
+    )
+    assert "THROWN=" in out and "시험도구" in out, out
+
+
+def test_install_method_orders():
+    out = _run_functions(
+        "'UV=' + ((Get-UvMethods).Keys -join ','); "
+        "'NODE=' + ((Get-NodeMethods).Keys -join ','); "
+        "'CLAUDE=' + ((Get-ClaudeMethods).Keys -join ',')"
+    )
+    assert "UV=uv-공식스크립트,uv-winget,uv-GitHub압축본" in out, out
+    assert "NODE=node-winget,node-공식설치파일,node-압축본" in out, out
+    assert "CLAUDE=claude-공식설치파일,claude-winget" in out, out
+
+
+def test_functions_only_mode_installs_nothing(tmp_path):
+    out = _run_functions("'LOADED'")
+    assert "LOADED" in out and "[1/6]" not in out, out
