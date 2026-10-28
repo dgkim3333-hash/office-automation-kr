@@ -24,8 +24,10 @@ class Field:
 class Table:
     start: str
     end: str
+    row_pattern: re.Pattern
     columns: list[str]
-    multiword_column: str | None = None
+    amount_columns: list[str]
+    quantity_columns: list[str]
 
 
 @dataclass
@@ -120,13 +122,30 @@ def _table(where, spec) -> Table | None:
         return None
     if not isinstance(spec, dict):
         raise RuleError(f"{where} 표 설정이 잘못됐습니다.")
+    if "여러단어열" in spec:
+        raise RuleError(f"{where} 표의 여러단어열은 더 이상 쓰지 않습니다. 행패턴으로 줄을 나누세요.")
     start, end, columns = spec.get("시작키워드"), spec.get("끝키워드"), spec.get("열")
     if not start or not end:
         raise RuleError(f"{where} 표에는 시작키워드와 끝키워드가 모두 있어야 합니다.")
     if not isinstance(columns, list) or not columns:
         raise RuleError(f"{where} 표의 열은 [열1, 열2] 처럼 적어야 합니다.")
     columns = [str(c) for c in columns]
-    multi = spec.get("여러단어열")
-    if multi is not None and multi not in columns:
-        raise RuleError(f"{where} 표의 여러단어열 '{multi}' 가 열 목록에 없습니다.")
-    return Table(start=str(start), end=str(end), columns=columns, multiword_column=multi)
+    if not spec.get("행패턴"):
+        raise RuleError(f"{where} 표에 행패턴(품목 한 줄을 나누는 정규식)이 없습니다.")
+    try:
+        row_pattern = re.compile(spec["행패턴"])
+    except re.error as e:
+        raise RuleError(f"{where} 표 행패턴 정규식 오류: {e}") from None
+    if row_pattern.groups != len(columns):
+        raise RuleError(
+            f"{where} 표 행패턴의 괄호 수({row_pattern.groups})와 열 수({len(columns)})가 다릅니다."
+        )
+    typed = {}
+    for key in ("금액열", "수량열"):
+        names = [str(c) for c in spec.get(key) or []]
+        for name in names:
+            if name not in columns:
+                raise RuleError(f"{where} 표의 {key} '{name}' 가 열 목록에 없습니다.")
+        typed[key] = names
+    return Table(start=str(start), end=str(end), row_pattern=row_pattern, columns=columns,
+                 amount_columns=typed["금액열"], quantity_columns=typed["수량열"])

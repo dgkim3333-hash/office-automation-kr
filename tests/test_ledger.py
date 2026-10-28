@@ -13,9 +13,11 @@ from app.ledger import Ledger, LedgerLocked
 from app.rules import load_rules
 
 REPO = Path(__file__).resolve().parent.parent
-SAMPLES = REPO / "samples"
-INVOICE = SAMPLES / "ACME_Invoice_INV-2026-0001.pdf"
-PO = SAMPLES / "ACME_PO_PO-77001.pdf"
+SAMPLES = REPO / "samples" / "03_Invoice_DM_PDF"
+INVOICE = SAMPLES / "INV-2026-10231.pdf"
+DM = SAMPLES / "DM-2026-0092.pdf"
+INVOICE_HEAD = ["처리일시", "원본파일", "인보이스번호", "발행일", "고객명", "고객PO번호", "판매오더번호", "결제조건",
+                "인도조건", "선적일", "운송사", "추적번호", "도착예정일", "소계", "운임", "합계금액", "정리된경로"]
 
 
 @pytest.fixture(scope="module")
@@ -43,9 +45,9 @@ def _add(ledger, pdf, rules, when=datetime(2026, 10, 28, 9, 0)):
 def test_new_ledger_has_five_sheets_and_headers(book, rules):
     Ledger.open(book, rules).save()
     wb = openpyxl.load_workbook(book)
-    assert wb.sheetnames == ["Invoice", "PO", "DM", "품목", "처리로그"]
-    assert _header(wb["Invoice"]) == ["처리일시", "원본파일", "인보이스번호", "발행일", "고객명", "합계금액", "정리된경로"]
-    assert _header(wb["품목"]) == ["문서종류", "문서번호", "품번", "품명", "수량", "단가", "금액"]
+    assert wb.sheetnames == ["DM", "Invoice", "PO", "품목", "처리로그"]  # 규칙 순서
+    assert _header(wb["Invoice"]) == INVOICE_HEAD
+    assert _header(wb["품목"]) == ["문서종류", "문서번호", "줄", "품번", "품명", "수량", "단가", "금액"]
     assert _header(wb["처리로그"]) == ["일시", "파일", "결과", "사유"]
     assert wb["Invoice"].tables  # 엑셀 표(필터)
     assert wb["Invoice"].freeze_panes == "A2"
@@ -61,15 +63,17 @@ def test_add_row_persists_with_formats(book, rules):
     rows = _data_rows(ws)
     assert len(rows) == 1
     row = dict(zip(header, rows[0]))
-    assert row["인보이스번호"] == "INV-2026-0001"
-    assert row["발행일"].date() == date(2026, 10, 15)
-    assert row["합계금액"] == pytest.approx(12345.67)
+    assert row["인보이스번호"] == "INV-2026-10231"
+    assert row["발행일"].date() == date(2026, 10, 14)
+    assert row["합계금액"] == pytest.approx(115440.00)
     assert row["원본파일"] == INVOICE.name
     date_cell = ws.cell(row=2, column=header.index("발행일") + 1)
     amount_cell = ws.cell(row=2, column=header.index("합계금액") + 1)
     assert "yy" in date_cell.number_format
     assert amount_cell.number_format == "#,##0.00"
-    assert len(_data_rows(openpyxl.load_workbook(book)["품목"])) == 3
+    items = _data_rows(openpyxl.load_workbook(book)["품목"])
+    assert len(items) == 4
+    assert items[0][5] == 2 and items[0][7] == pytest.approx(97000.00)  # 수량·금액은 숫자
     # 표 범위가 데이터 행까지 늘어남
     ref = ws.tables[next(iter(ws.tables))].ref
     assert re.fullmatch(r"A1:[A-Z]+2", ref)
@@ -81,9 +85,9 @@ def test_duplicate_detected_after_reopen(book, rules):
     ledger.save()
 
     again = Ledger.open(book, rules)
-    assert again.is_duplicate("Invoice", "INV-2026-0001") is True
+    assert again.is_duplicate("Invoice", "INV-2026-10231") is True
     assert again.is_duplicate("Invoice", "INV-0000") is False
-    assert again.is_duplicate("PO", "INV-2026-0001") is False
+    assert again.is_duplicate("DM", "INV-2026-10231") is False
     again.save()
     assert len(_data_rows(openpyxl.load_workbook(book)["Invoice"])) == 1
 
@@ -100,18 +104,18 @@ def test_new_field_column_appended_at_end(book, rules):
     Ledger.open(book, more).save()
 
     ws = openpyxl.load_workbook(book)["Invoice"]
-    assert _header(ws) == ["처리일시", "원본파일", "인보이스번호", "발행일", "고객명", "합계금액", "정리된경로", "통화"]
-    assert _data_rows(ws)[0][2] == "INV-2026-0001"
+    assert _header(ws) == INVOICE_HEAD + ["통화"]
+    assert _data_rows(ws)[0][2] == "INV-2026-10231"
 
 
 def test_overwrite_replaces_document_and_items(book, rules):
     ledger = Ledger.open(book, rules)
     _add(ledger, INVOICE, rules, when=datetime(2026, 10, 1, 9, 0))
-    _add(ledger, PO, rules)
+    _add(ledger, DM, rules)
     ledger.save()
 
     ledger = Ledger.open(book, rules)
-    ledger.remove("Invoice", "INV-2026-0001")
+    ledger.remove("Invoice", "INV-2026-10231")
     _add(ledger, INVOICE, rules, when=datetime(2026, 10, 28, 15, 30))
     ledger.save()
 
@@ -120,8 +124,8 @@ def test_overwrite_replaces_document_and_items(book, rules):
     assert len(rows) == 1
     assert rows[0][0] == datetime(2026, 10, 28, 15, 30)
     items = _data_rows(wb["품목"])
-    assert len(items) == 3 + 2  # Invoice 3줄 + PO 2줄, 중복 없음
-    assert sum(1 for r in items if r[0] == "Invoice") == 3
+    assert len(items) == 4 + 1  # Invoice 4줄 + DM 1줄, 중복 없음
+    assert sum(1 for r in items if r[0] == "Invoice") == 4
 
 
 def test_log_rows(book, rules):

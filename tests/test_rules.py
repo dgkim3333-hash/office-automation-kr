@@ -21,17 +21,45 @@ def _broken(tmp_path, change):
 
 def test_load_example_rules():
     rules = load_rules(EXAMPLE)
-    assert [d.name for d in rules.doc_types] == ["Invoice", "PO", "DM"]
-    invoice = rules.doc_types[0]
-    assert invoice.keywords == ["INVOICE", "Invoice No"]
+    assert [d.name for d in rules.doc_types] == ["DM", "Invoice", "PO"]  # 검사 순서: DM 먼저
+    invoice = rules.get("Invoice")
+    assert invoice.keywords == ["Invoice No"]
     assert invoice.number_field == "인보이스번호"
-    assert list(invoice.fields) == ["인보이스번호", "발행일", "고객명", "합계금액"]
+    assert list(invoice.fields)[:3] == ["인보이스번호", "발행일", "고객명"]
     assert invoice.fields["발행일"].fmt == "날짜"
     assert invoice.fields["합계금액"].fmt == "금액"
     assert invoice.fields["고객명"].fmt is None
-    assert invoice.fields["고객명"].pattern.search("Bill To: X").group(1) == "X"
-    assert invoice.table.columns == ["품번", "품명", "수량", "단가", "금액"]
-    assert invoice.table.multiword_column == "품명"
+    table = invoice.table
+    assert table.columns == ["줄", "품번", "품명", "수량", "단가", "금액"]
+    assert table.amount_columns == ["단가", "금액"]
+    assert table.quantity_columns == ["수량"]
+    assert table.row_pattern.match("1 P-1 Big Pump, 2 kW 2 1,000.00 2,000.00").groups() == (
+        "1", "P-1", "Big Pump, 2 kW", "2", "1,000.00", "2,000.00")
+    assert rules.get("PO").table is None
+
+
+def test_row_pattern_group_count_must_match_columns(tmp_path):
+    path = _broken(tmp_path, lambda d: d["표"].update(열=["줄", "품번"]))
+    with pytest.raises(RuleError, match="행패턴"):
+        load_rules(path)
+
+
+def test_amount_column_must_be_in_columns(tmp_path):
+    path = _broken(tmp_path, lambda d: d["표"].update(금액열=["합계"]))
+    with pytest.raises(RuleError, match="합계"):
+        load_rules(path)
+
+
+def test_table_without_row_pattern_raises(tmp_path):
+    path = _broken(tmp_path, lambda d: d["표"].pop("행패턴"))
+    with pytest.raises(RuleError, match="행패턴"):
+        load_rules(path)
+
+
+def test_old_multiword_key_is_rejected(tmp_path):
+    path = _broken(tmp_path, lambda d: d["표"].update(여러단어열="품명"))
+    with pytest.raises(RuleError, match="행패턴"):
+        load_rules(path)
 
 
 def test_bad_regex_raises_with_type_and_field(tmp_path):

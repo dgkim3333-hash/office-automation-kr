@@ -9,3 +9,4 @@ __pycache__/
 
 # 장부는 저장소에 두지 않는다
 *.xlsx
+!samples/**/*.xlsx

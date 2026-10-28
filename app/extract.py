@@ -126,21 +126,27 @@ def _table_rows(table, text, warnings):
     for line in lines[start + 1:end]:
         if not line.strip():
             continue
-        cells = _split_row(line, table)
-        if cells is None:
-            warnings.append(f"표 열 개수 불일치 — 품목 건너뜀: {line.strip()}")
+        row = _parse_row(line.strip(), table)
+        if row is None:
+            warnings.append(f"표 행패턴과 맞지 않는 줄 — 품목 건너뜀: {line.strip()}")
             return None
-        rows.append(dict(zip(table.columns, cells)))
+        rows.append(row)
     return rows
 
 
-def _split_row(line, table):
-    """한 줄을 열 개수로 쪼갠다. 단어가 남으면 여러단어열에 몰아 넣는다."""
-    words, n = line.split(), len(table.columns)
-    if len(words) == n:
-        return words
-    if len(words) < n or table.multiword_column is None:
+def _parse_row(line, table):
+    """행패턴으로 한 줄을 나누고 금액열·수량열을 숫자로 바꾼다. 안 맞으면 None."""
+    match = table.row_pattern.match(line)
+    if not match:
         return None
-    i = table.columns.index(table.multiword_column)
-    right = n - i - 1
-    return words[:i] + [" ".join(words[i:len(words) - right])] + words[len(words) - right:]
+    row = {name: (value or "").strip() for name, value in zip(table.columns, match.groups())}
+    for name in table.amount_columns:
+        row[name] = to_amount(row[name])
+        if row[name] is None:
+            return None
+    for name in table.quantity_columns:
+        amount = to_amount(row[name])
+        if amount is None or amount != amount.to_integral_value():
+            return None
+        row[name] = int(amount)
+    return row
