@@ -8,13 +8,14 @@ REPO = Path(__file__).resolve().parent.parent
 # 설계 4절의 장 목록. 아직 안 쓴 장으로 가는 링크는 허용하되, 마지막에는 전부 있어야 한다.
 PLANNED = [
     "01_구조_이해.md",
-    "02_설치.md",
-    "03_첫_실행_10분.md",
-    "04_내_양식_가르치기.md",
-    "05_매일_쓰기.md",
-    "06_프로젝트와_예정됨.md",
-    "07_선택_Outlook_자동수집.md",
-    "08_선택_엑셀PO변환.md",
+    "02_기본_설치.md",
+    "03_프로그램_설치.md",
+    "04_첫_실행_10분.md",
+    "05_내_양식_가르치기.md",
+    "06_매일_쓰기.md",
+    "07_프로젝트와_예정됨.md",
+    "08_선택_Outlook_자동수집.md",
+    "09_선택_엑셀PO변환.md",
     "99_막혔을_때.md",
 ]
 LINK = re.compile(r"\]\(([^)#\s]+)(#[^)]*)?\)")
@@ -58,7 +59,7 @@ def test_chapter_ends_with_next(path):
 
 
 def test_chapter_02_first_line_is_code_tab():
-    path = REPO / "02_설치.md"
+    path = REPO / "02_기본_설치.md"
     if path.exists():
         first = _body_lines(path)[0]
         assert "Code 탭" in first and "채팅" in first

@@ -1,9 +1,13 @@
 # office-automation-kr 자동 설치
 # 사용법(PowerShell 에 한 줄 붙여 넣기):
-#   [Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://raw.githubusercontent.com/dgkim3333-hash/office-automation-kr/main/install.ps1 | iex
-# 순서: 1 Claude Desktop → 2 Node.js → 3 uv·uvx → 4 이 저장소 → 5 작업 폴더 → 6 기본 약속(전역 CLAUDE.md).
+#   02장 기본 설치   : [Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://raw.githubusercontent.com/dgkim3333-hash/office-automation-kr/main/setup-base.ps1 | iex
+#   03장 프로그램 설치: [Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://raw.githubusercontent.com/dgkim3333-hash/office-automation-kr/main/setup-program.ps1 | iex
+#   한 번에 전부    : [Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://raw.githubusercontent.com/dgkim3333-hash/office-automation-kr/main/install.ps1 | iex
+# 순서: 1 Claude Desktop → 2 Node.js → 3 uv·uvx (기본) → 4 이 저장소 → 5 작업 폴더 → 6 기본 약속(전역 CLAUDE.md) (프로그램).
 # 이미 있는 것은 건너뛴다. 설치 방법이 막히면 다음 방법으로 넘어간다. 전역 CLAUDE.md 가 이미 있으면 절대 건드리지 않는다.
 param(
+    [ValidateSet('all', 'base', 'program')]
+    [string]$Part = 'all',  # base = 1~3단계(02장), program = 4~6단계(03장)
     [switch]$DryRun,  # 시험용: 1~3 단계 설치를 건너뜀
     [string]$RepoZip = 'https://github.com/dgkim3333-hash/office-automation-kr/archive/refs/heads/main.zip',
     [string]$InstallDir = 'C:\dev',
@@ -15,7 +19,12 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 
-function Step($n, $text) { Write-Host ''; Write-Host "[$n/6] $text" -ForegroundColor Cyan }
+# 화면의 단계 번호: 전부 = 1~6, 기본 = 1~3, 프로그램 = 4~6 을 1~3 으로
+$StepFrom = 0
+$StepTotal = 6
+if ($Part -ne 'all') { $StepTotal = 3 }
+if ($Part -eq 'program') { $StepFrom = 3 }
+function Step($n, $text) { Write-Host ''; Write-Host "[$($n - $StepFrom)/$StepTotal] $text" -ForegroundColor Cyan }
 function Done($text) { Write-Host "      $text" -ForegroundColor Green }
 
 function Update-SessionPath {
@@ -153,69 +162,79 @@ if ($env:OA_INSTALL_FUNCTIONS_ONLY -eq '1') { return }
 try {
     Write-Host '사무 자동화 설치를 시작합니다. 창을 닫지 마세요.' -ForegroundColor Yellow
 
-    Step 1 'Claude Desktop'
-    if (Test-ClaudeDesktop) { Done '이미 설치돼 있습니다.' }
-    elseif ($DryRun) { Done '(시험 실행) 건너뜀' }
-    else {
-        $used = Invoke-FirstWorking 'Claude Desktop' (Get-ClaudeMethods) { Test-ClaudeDesktop }
-        Done "설치했습니다. ($used)"
+    if ($Part -ne 'program') {
+        Step 1 'Claude Desktop'
+        if (Test-ClaudeDesktop) { Done '이미 설치돼 있습니다.' }
+        elseif ($DryRun) { Done '(시험 실행) 건너뜀' }
+        else {
+            $used = Invoke-FirstWorking 'Claude Desktop' (Get-ClaudeMethods) { Test-ClaudeDesktop }
+            Done "설치했습니다. ($used)"
+        }
+
+        Step 2 'Node.js'
+        Update-SessionPath
+        if (Test-Cmd node) { Done "이미 있습니다. $(node --version)" }
+        elseif ($DryRun) { Done '(시험 실행) 건너뜀' }
+        else {
+            $used = Invoke-FirstWorking 'Node.js' (Get-NodeMethods) { Test-Cmd node }
+            Done "설치했습니다. $(node --version) ($used)"
+        }
+
+        Step 3 'uv · uvx'
+        if ((Test-Cmd uv) -and (Test-Cmd uvx)) { Done "이미 있습니다. $(uv --version)" }
+        elseif ($DryRun) { Done '(시험 실행) 건너뜀' }
+        else {
+            $used = Invoke-FirstWorking 'uv' (Get-UvMethods) { (Test-Cmd uv) -and (Test-Cmd uvx) }
+            Done "설치했습니다. $(uv --version) ($used)"
+        }
+        if (-not (Test-Cmd uvx)) { throw 'uvx 를 찾지 못했습니다.' }
     }
 
-    Step 2 'Node.js'
-    Update-SessionPath
-    if (Test-Cmd node) { Done "이미 있습니다. $(node --version)" }
-    elseif ($DryRun) { Done '(시험 실행) 건너뜀' }
-    else {
-        $used = Invoke-FirstWorking 'Node.js' (Get-NodeMethods) { Test-Cmd node }
-        Done "설치했습니다. $(node --version) ($used)"
-    }
+    if ($Part -ne 'base') {
+        if (-not (Test-Cmd uv)) { throw '먼저 02장 「기본 설치」를 하세요 (uv 가 없습니다).' }
+        Step 4 '사무 자동화 프로그램'
+        # 다시 실행하면 프로그램 파일만 새 판으로 덮어쓴다. 작업폴더.txt·.venv·내가 넣은 파일은 그대로 둔다.
+        $repo = Join-Path $InstallDir 'office-automation-kr-main'
+        $hadBefore = Test-Path -LiteralPath (Join-Path $repo 'run.bat')
+        New-Item -ItemType Directory -Force -Path $repo | Out-Null
+        $zip = Join-Path $InstallDir 'office-automation-kr-main.zip'
+        Get-File $RepoZip $zip
+        $fresh = Expand-ToTemp $zip
+        Remove-Item -LiteralPath $zip -Force
+        Get-ChildItem -LiteralPath (Join-Path $fresh 'office-automation-kr-main') -Force |
+            Copy-Item -Destination $repo -Recurse -Force
+        Remove-Item -LiteralPath $fresh -Recurse -Force -ErrorAction SilentlyContinue
+        if ($hadBefore) { Done "새 판으로 바꿨습니다. $repo (작업 폴더와 내 파일은 그대로)" }
+        else { Done "받았습니다. $repo" }
 
-    Step 3 'uv · uvx'
-    if ((Test-Cmd uv) -and (Test-Cmd uvx)) { Done "이미 있습니다. $(uv --version)" }
-    elseif ($DryRun) { Done '(시험 실행) 건너뜀' }
-    else {
-        $used = Invoke-FirstWorking 'uv' (Get-UvMethods) { (Test-Cmd uv) -and (Test-Cmd uvx) }
-        Done "설치했습니다. $(uv --version) ($used)"
-    }
-    if (-not (Test-Cmd uvx)) { throw 'uvx 를 찾지 못했습니다.' }
+        Step 5 '작업 폴더 (처음 한 번은 1~3분 걸립니다)'
+        Push-Location -LiteralPath $repo
+        try { & uv run python -m app init $WorkDir; $code = $LASTEXITCODE } finally { Pop-Location }
+        if ($code -ne 0) { throw '작업 폴더를 만들지 못했습니다.' }
 
-    Step 4 '사무 자동화 프로그램'
-    # 다시 실행하면 프로그램 파일만 새 판으로 덮어쓴다. 작업폴더.txt·.venv·내가 넣은 파일은 그대로 둔다.
-    $repo = Join-Path $InstallDir 'office-automation-kr-main'
-    $hadBefore = Test-Path -LiteralPath (Join-Path $repo 'run.bat')
-    New-Item -ItemType Directory -Force -Path $repo | Out-Null
-    $zip = Join-Path $InstallDir 'office-automation-kr-main.zip'
-    Get-File $RepoZip $zip
-    $fresh = Expand-ToTemp $zip
-    Remove-Item -LiteralPath $zip -Force
-    Get-ChildItem -LiteralPath (Join-Path $fresh 'office-automation-kr-main') -Force |
-        Copy-Item -Destination $repo -Recurse -Force
-    Remove-Item -LiteralPath $fresh -Recurse -Force -ErrorAction SilentlyContinue
-    if ($hadBefore) { Done "새 판으로 바꿨습니다. $repo (작업 폴더와 내 파일은 그대로)" }
-    else { Done "받았습니다. $repo" }
-
-    Step 5 '작업 폴더 (처음 한 번은 1~3분 걸립니다)'
-    Push-Location -LiteralPath $repo
-    try { & uv run python -m app init $WorkDir; $code = $LASTEXITCODE } finally { Pop-Location }
-    if ($code -ne 0) { throw '작업 폴더를 만들지 못했습니다.' }
-
-    Step 6 '기본 약속 (전역 CLAUDE.md)'
-    $globalFile = Join-Path $ClaudeHome 'CLAUDE.md'
-    $template = Join-Path $repo 'claude\전역_CLAUDE.md'
-    if ($DryRun -and -not $PSBoundParameters.ContainsKey('ClaudeHome')) { Done '(시험 실행) 건너뜀' }
-    elseif (Test-Path -LiteralPath $globalFile) { Done "이미 있어서 건드리지 않았습니다. $globalFile" }
-    elseif (-not (Test-Path -LiteralPath $template)) { Done '약속 파일이 없어 건너뜀' }
-    else {
-        New-Item -ItemType Directory -Force -Path $ClaudeHome | Out-Null
-        Copy-Item -LiteralPath $template -Destination $globalFile
-        Done "만들었습니다. $globalFile"
+        Step 6 '기본 약속 (전역 CLAUDE.md)'
+        $globalFile = Join-Path $ClaudeHome 'CLAUDE.md'
+        $template = Join-Path $repo 'claude\전역_CLAUDE.md'
+        if ($DryRun -and -not $PSBoundParameters.ContainsKey('ClaudeHome')) { Done '(시험 실행) 건너뜀' }
+        elseif (Test-Path -LiteralPath $globalFile) { Done "이미 있어서 건드리지 않았습니다. $globalFile" }
+        elseif (-not (Test-Path -LiteralPath $template)) { Done '약속 파일이 없어 건너뜀' }
+        else {
+            New-Item -ItemType Directory -Force -Path $ClaudeHome | Out-Null
+            Copy-Item -LiteralPath $template -Destination $globalFile
+            Done "만들었습니다. $globalFile"
+        }
     }
 
     Write-Host ''
-    Write-Host '끝났습니다.' -ForegroundColor Green
-    Write-Host "다음: Claude 열기 → 로그인 → 「Code」 → 「폴더 열기」 → $repo"
-    Write-Host '그다음 03장(첫 실행 10분)을 하세요.'
-    if (-not $DryRun) { Start-Process explorer.exe -ArgumentList "`"$repo`"" }
+    if ($Part -eq 'base') {
+        Write-Host '기본 설치가 끝났습니다.' -ForegroundColor Green
+        Write-Host '다음: Claude 열기 → 로그인 → 그다음 03장(프로그램 설치)을 하세요.'
+    } else {
+        Write-Host '끝났습니다.' -ForegroundColor Green
+        Write-Host "다음: Claude 열기 → 로그인 → 「Code」 → 「폴더 열기」 → $repo"
+        Write-Host '그다음 04장(첫 실행 10분)을 하세요.'
+        if (-not $DryRun) { Start-Process explorer.exe -ArgumentList "`"$repo`"" }
+    }
 } catch {
     Write-Host ''
     Write-Host "설치가 멈췄습니다: $($_.Exception.Message)" -ForegroundColor Red

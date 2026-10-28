@@ -192,3 +192,48 @@ def test_install_method_orders():
 def test_functions_only_mode_installs_nothing(tmp_path):
     out = _run_functions("'LOADED'")
     assert "LOADED" in out and "[1/6]" not in out, out
+
+# --- 02장 기본 설치 / 03장 프로그램 설치로 나누어 실행 ---
+
+def test_part_base_runs_only_tool_steps(tmp_path, repo_zip):
+    install_dir = tmp_path / "dev"
+    proc = _run_like_irm("-DryRun", "-Part", "base", "-RepoZip", str(repo_zip), "-InstallDir", str(install_dir),
+                         "-WorkDir", str(tmp_path / "사무자동화"))
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
+    assert "[1/3] Claude Desktop" in out and "[3/3] uv" in out
+    assert "사무 자동화 프로그램" not in out
+    assert not install_dir.exists()  # 프로그램은 받지 않음
+    assert "03장" in out  # 다음에 할 일 안내
+
+
+def test_part_program_runs_only_program_steps(tmp_path, repo_zip):
+    install_dir = tmp_path / "dev"
+    work_dir = tmp_path / "사무자동화"
+    home = tmp_path / "claude_home"
+    proc = _run_like_irm("-DryRun", "-Part", "program", "-RepoZip", str(repo_zip), "-InstallDir", str(install_dir),
+                         "-WorkDir", str(work_dir), "-ClaudeHome", str(home))
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
+    assert "] Claude Desktop" not in out and "] Node.js" not in out  # 1~3단계 제목이 없음
+    assert "[1/3] 사무 자동화 프로그램" in out and "[3/3] 기본 약속" in out
+    assert (install_dir / "office-automation-kr-main" / "run.bat").is_file()
+    assert (work_dir / "받은문서").is_dir()
+    assert (home / "CLAUDE.md").is_file()
+    assert "04장" in out
+
+
+@pytest.mark.parametrize("name, part", [("setup-base.ps1", "base"), ("setup-program.ps1", "program")])
+def test_setup_wrappers(name, part):
+    wrapper = REPO / name
+    raw = wrapper.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8")
+    assert "raw.githubusercontent.com/dgkim3333-hash/office-automation-kr/main/install.ps1" in text
+    assert f"-Part {part}" in text
+    check = (
+        "$e = $null; [System.Management.Automation.Language.Parser]::ParseInput("
+        f"[IO.File]::ReadAllText('{wrapper}', [Text.Encoding]::UTF8), [ref]$null, [ref]$e) | Out-Null; $e.Count"
+    )
+    out = subprocess.run(PS + ["-Command", check], capture_output=True, text=True, timeout=60)
+    assert out.stdout.strip() == "0", out.stdout + out.stderr

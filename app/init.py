@@ -72,5 +72,5 @@ def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_folder
     config.work_dir_file(repo_root).write_text(str(work_dir) + "\n", encoding="utf-8")
 
     print(f"작업 폴더: {work_dir}")
-    print("이제 03장으로 가세요.")
+    print("이제 04장으로 가세요.")
     return work_dir

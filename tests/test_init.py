@@ -51,7 +51,7 @@ def test_saves_work_folder_txt(tmp_path, repo, capsys):
     work = tmp_path / "사무자동화"
     init(work_dir=work, repo_root=repo)
     assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work.resolve())
-    assert "03장" in capsys.readouterr().out
+    assert "04장" in capsys.readouterr().out
 
 
 def test_config_work_dir_reads_txt(tmp_path, repo):
@@ -106,4 +106,4 @@ def test_main_init_with_path_does_not_ask(repo, tmp_path, monkeypatch, capsys):
     assert (work / "받은문서" / "중복").is_dir()
     assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work.resolve())
     assert main(["init", str(work)], repo_root=repo) == 0  # 다시 실행해도 그대로
-    assert "03장" in capsys.readouterr().out
+    assert "04장" in capsys.readouterr().out
