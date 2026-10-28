@@ -21,4 +21,5 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-rf"  # 실패한 테스트 이름을 요약에 항상 찍는다
 pythonpath = ["."]
