@@ -7,6 +7,8 @@
   uv run python -m app outlook        (선택) Outlook '자동화' 폴더 첨부 → 받은문서 (수집.bat)
 """
 import argparse
+import os
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -30,7 +32,9 @@ LOG_LOCKED_MESSAGE = (
     "처리로그.csv 가 다른 프로그램(엑셀 등)에서 열려 있습니다. 닫고 다시 실행하세요.\n"
     "(파일은 하나도 옮기지 않았습니다.)"
 )
-HELD_REASON = "다른 프로그램(PDF 뷰어 등)에서 열려 있어 옮길 수 없음. 닫고 다시 실행하세요"
+DEMO_DIR = "_체험"  # 작업 폴더 안의 체험 전용 폴더
+SAMPLE_PDFS = Path("samples") / "03_Invoice_DM_PDF"
+HELD_REASON ="다른 프로그램(PDF 뷰어 등)에서 열려 있어 옮길 수 없음. 닫고 다시 실행하세요"
 
 
 def _now():
@@ -96,6 +100,40 @@ def run(work: Path, rules, overwrite=False) -> int:
         print(f"확인필요 폴더의 .txt 를 열어 사유를 보세요: {work / config.REVIEW}")
     if any(i.outcome in ("보류", "이동 실패") for i in items):
         print("보류·이동 실패 파일은 받은문서에 그대로 있습니다. 열린 프로그램을 닫고 다시 실행하세요.")
+    return 0
+
+
+def _open(path):
+    """기본 프로그램으로 연다(엑셀 등). 시험에서는 바꿔 끼운다."""
+    os.startfile(str(path))
+
+
+def demo(work: Path, repo_root) -> int:
+    """04장 첫 실행: 가짜 샘플을 따로 된 체험 폴더에서 처리하고 장부를 연다. 진짜 작업 폴더는 건드리지 않는다."""
+    rules = load_rules(Path(repo_root) / config.EXAMPLE_RULES)  # 내 규칙이 아니라 예시 규칙
+    folder = work / DEMO_DIR
+    try:
+        if folder.exists():
+            shutil.rmtree(folder)  # 매번 처음부터
+    except OSError:
+        print("체험 장부가 엑셀에서 열려 있습니다. 엑셀을 닫고 체험.bat 을 다시 누르세요.")
+        return 2
+    for sub in (config.INBOX, f"{config.INBOX}/{config.DUPLICATES}", config.ORGANIZED, config.REVIEW):
+        (folder / sub).mkdir(parents=True, exist_ok=True)
+    samples = sorted((Path(repo_root) / SAMPLE_PDFS).glob("*.pdf"))
+    for pdf in samples:
+        shutil.copy(pdf, folder / config.INBOX / pdf.name)
+    print(f"가짜 샘플 {len(samples)}개로 체험합니다. 체험 폴더: {folder}")
+    print()
+    code = run(folder, rules)
+    if code != 0:
+        return code
+    print()
+    print("뜻: 성공 4 = 가짜 Invoice 2장·DM 2장이 장부에 들어갔습니다.")
+    print("    확인필요 2 = 일부러 넣은 편지와 스캔본입니다. 이렇게 나오는 것이 정상입니다.")
+    print(f"진짜 PDF 는 {work / config.INBOX} 에 넣고 run.bat 을 누르세요. 체험 폴더는 진짜 장부와 섞이지 않습니다.")
+    print("장부(엑셀)를 엽니다.")
+    _open(folder / config.LEDGER_FILE)
     return 0
 
 
@@ -170,8 +208,8 @@ def _move(item, work):
 
 def _parser():
     p = argparse.ArgumentParser(prog="python -m app", description="PDF → 엑셀 장부 사무 자동화")
-    p.add_argument("command", nargs="?", choices=["init", "check", "outlook"],
-                   help="init · check · outlook (없으면 받은문서 처리)")
+    p.add_argument("command", nargs="?", choices=["init", "check", "outlook", "demo"],
+                   help="init · check · outlook · demo (없으면 받은문서 처리)")
     p.add_argument("target", nargs="?", help="check 할 PDF 경로, 또는 init 할 작업 폴더 경로")
     p.add_argument("--덮어쓰기", dest="overwrite", action="store_true", help="이미 있는 문서를 새 내용으로 바꿈")
     return p
@@ -211,6 +249,8 @@ def _dispatch(args, repo_root) -> int:
             return 0
         work = config.work_dir(repo_root)
         check_work_dir(work)
+        if args.command == "demo":
+            return demo(work, repo_root)
         if args.command == "outlook":
             collect_from_outlook(work / config.INBOX)
             return 0

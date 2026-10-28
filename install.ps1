@@ -261,7 +261,7 @@ try {
     } else {
         Write-Host '끝났습니다.' -ForegroundColor Green
         Write-Host "다음: Claude 열기 → 로그인 → 「Code」 → 「폴더 열기」 → $repo"
-        Write-Host '그다음 04장(첫 실행 10분)을 하세요.'
+        Write-Host "그다음 04장: $repo\체험.bat 을 두 번 클릭하세요."
         if (-not $DryRun) { Start-Process explorer.exe -ArgumentList "`"$repo`"" }
     }
 } catch {
