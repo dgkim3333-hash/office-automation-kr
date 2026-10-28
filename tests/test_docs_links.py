@@ -98,3 +98,8 @@ def test_relative_links_exist(path):
         if (path.parent / target).exists():
             continue
         assert target in PLANNED, f"{path.name}: 없는 파일로 가는 링크 {target}"
+
+
+def test_all_planned_chapters_exist():
+    missing = [name for name in PLANNED if not (REPO / name).exists()]
+    assert missing == [], f"아직 없는 장: {missing}"
