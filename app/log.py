@@ -4,6 +4,7 @@ from pathlib import Path
 
 COLUMNS = ["일시", "파일", "결과", "사유"]
 OUTCOMES = ("성공", "중복", "확인필요")
+EXTRA_OUTCOMES = ("보류", "이동 실패")
 
 
 def append_log(path, when, file_name, outcome, reason):
@@ -18,5 +19,7 @@ def append_log(path, when, file_name, outcome, reason):
 
 
 def summary(outcomes) -> str:
+    """성공·중복·확인필요는 항상, 보류·이동 실패는 있을 때만."""
     outcomes = list(outcomes)
-    return " · ".join(f"{name} {outcomes.count(name)}" for name in OUTCOMES)
+    names = list(OUTCOMES) + [o for o in EXTRA_OUTCOMES if o in outcomes]
+    return " · ".join(f"{name} {outcomes.count(name)}" for name in names)

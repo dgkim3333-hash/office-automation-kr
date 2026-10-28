@@ -1,6 +1,6 @@
 """파일 이동(삭제·덮어쓰기 없음), 이름 충돌 처리, 확인필요 .txt 작성."""
+import os
 import re
-import shutil
 import string
 from pathlib import Path
 
@@ -48,7 +48,8 @@ def free_name(path: Path, reserved=()) -> Path:
 def _move(src, dst) -> Path:
     dst = free_name(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dst))
+    # 같은 디스크 안 이름 바꾸기만 쓴다. 실패하면 원본은 그대로 남는다(복사 후 삭제로 넘어가지 않음).
+    os.rename(src, dst)
     return dst
 
 

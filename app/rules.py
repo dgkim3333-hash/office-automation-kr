@@ -85,12 +85,14 @@ def _doc_type(name, body) -> DocType:
     if not isinstance(filename_tpl, str) or not filename_tpl:
         raise RuleError(f"{where} 파일명이 없습니다.")
     try:
-        names = [n for _, n, _, _ in string.Formatter().parse(filename_tpl) if n is not None]
+        parts = [(n, spec) for _, n, spec, _ in string.Formatter().parse(filename_tpl) if n is not None]
     except ValueError as e:
         raise RuleError(f"{where} 파일명 중괄호 오류: {e}") from None
-    for n in names:
+    for n, spec in parts:
         if n not in fields:
             raise RuleError(f"{where} 파일명의 {{{n}}} 가 필드 목록에 없습니다.")
+        if spec and fields[n].fmt != "날짜":
+            raise RuleError(f"{where} 파일명의 {{{n}:{spec}}} 처럼 ':' 서식은 '형식: 날짜' 필드에만 쓸 수 있습니다.")
 
     return DocType(
         name=name,

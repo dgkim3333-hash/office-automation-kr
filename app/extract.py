@@ -8,7 +8,7 @@ import pdfplumber
 
 HEAD_LINES = 30
 DATE_FORMATS = ("%m/%d/%Y", "%Y-%m-%d")
-NO_TEXT = "텍스트 없음 — 스캔본, OCR 범위 밖"
+NO_TEXT = "텍스트 없음 (스캔본, OCR 범위 밖)"
 
 
 @dataclass
@@ -27,9 +27,9 @@ class ExtractResult:
         if not self.has_text:
             return NO_TEXT
         if self.doc_type is None:
-            return "판별 실패 — 판별키워드가 하나도 없습니다"
+            return "판별 실패 (판별키워드가 하나도 없음)"
         if self.missing_required:
-            return f"번호필드 미추출 — '{self.doc_type.number_field}' 패턴이 맞지 않습니다"
+            return f"번호필드 미추출 ('{self.doc_type.number_field}' 패턴이 맞지 않음)"
         return None
 
     @property
@@ -115,11 +115,11 @@ def _table_rows(table, text, warnings):
     lines = text.splitlines()
     start = next((i for i, line in enumerate(lines) if table.start in line), None)
     if start is None:
-        warnings.append(f"표 시작키워드 '{table.start}' 없음 — 품목 건너뜀")
+        warnings.append(f"표 시작키워드 '{table.start}' 없음, 품목 건너뜀")
         return None
     end = next((i for i in range(start + 1, len(lines)) if table.end in lines[i]), None)
     if end is None:
-        warnings.append(f"표 끝키워드 '{table.end}' 없음 — 품목 건너뜀")
+        warnings.append(f"표 끝키워드 '{table.end}' 없음, 품목 건너뜀")
         return None
 
     rows = []
@@ -128,7 +128,7 @@ def _table_rows(table, text, warnings):
             continue
         row = _parse_row(line.strip(), table)
         if row is None:
-            warnings.append(f"표 행패턴과 맞지 않는 줄 — 품목 건너뜀: {line.strip()}")
+            warnings.append(f"표 행패턴과 맞지 않는 줄이 있어 품목 건너뜀: {line.strip()}")
             return None
         rows.append(row)
     return rows

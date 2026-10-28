@@ -1,4 +1,4 @@
-"""설치.bat 본체 — 작업 폴더를 고르고 빈 구조를 만든다."""
+"""설치.bat 본체: 작업 폴더를 고르고 빈 구조를 만든다."""
 import shutil
 from pathlib import Path
 
@@ -65,5 +65,6 @@ def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_folder
         shutil.copyfile(repo_root / config.EXAMPLE_RULES, rules)
     config.work_dir_file(repo_root).write_text(str(work_dir) + "\n", encoding="utf-8")
 
-    print(f"작업 폴더: {work_dir} — 03장으로 가세요")
+    print(f"작업 폴더: {work_dir}")
+    print("이제 03장으로 가세요.")
     return work_dir

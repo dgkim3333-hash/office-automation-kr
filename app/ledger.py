@@ -1,11 +1,13 @@
-"""누적장부.xlsx — 열 동기화, 행 추가, 중복 판정, 잠김 감지."""
+"""누적장부.xlsx: 열 동기화, 행 추가, 중복 판정, 잠김 감지."""
 import os
+import shutil
 import sys
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import openpyxl
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
@@ -19,14 +21,16 @@ LOG_COLUMNS = ["일시", "파일", "결과", "사유"]
 DATETIME_FORMAT = "yyyy-mm-dd hh:mm:ss"
 DATE_FORMAT = "yyyy-mm-dd"
 AMOUNT_FORMAT = "#,##0.00"
+TABLE_PREFIX = "Ledger_"
 
 
 class LedgerLocked(Exception):
     """장부가 엑셀에서 열려 있어 쓸 수 없을 때."""
 
 
-def _is_locked(path: Path) -> bool:
-    """다른 프로그램(엑셀)이 파일을 열고 있으면 True."""
+def is_locked(path) -> bool:
+    """다른 프로그램(엑셀·PDF 뷰어 등)이 파일을 열고 있으면 True."""
+    path = Path(path)
     if not path.exists():
         return False
     if sys.platform == "win32":
@@ -59,7 +63,7 @@ class Ledger:
     @classmethod
     def open(cls, path, rules):
         path = Path(path)
-        if _is_locked(path):
+        if is_locked(path):
             raise LedgerLocked(str(path))
         wb = openpyxl.load_workbook(path) if path.exists() else _new_workbook()
         ledger = cls(path, rules, wb)
@@ -69,6 +73,9 @@ class Ledger:
     # --- 열 동기화 ---
 
     def _sync_columns(self):
+        for name in (ITEMS_SHEET, LOG_SHEET):  # 사용자가 지웠으면 다시 만든다
+            if name not in self.wb.sheetnames:
+                self.wb.create_sheet(name)
         for doc_type in self.rules.doc_types:
             if doc_type.name not in self.wb.sheetnames:
                 self.wb.create_sheet(doc_type.name, index=self.wb.sheetnames.index(ITEMS_SHEET))
@@ -85,6 +92,15 @@ class Ledger:
 
     def is_duplicate(self, doc_type_name, number) -> bool:
         return bool(self._doc_rows(doc_type_name, number))
+
+    def organized_path(self, doc_type_name, number) -> str | None:
+        """장부에 적힌 정리된경로(작업 폴더 기준). 없으면 None."""
+        rows = self._doc_rows(doc_type_name, number)
+        if not rows:
+            return None
+        ws = self.wb[doc_type_name]
+        value = ws.cell(rows[0], _header(ws).index(DOC_TAIL[0]) + 1).value
+        return str(value) if value else None
 
     def add(self, result, source_name, organized_path, processed_at=None):
         doc_type = result.doc_type
@@ -118,12 +134,23 @@ class Ledger:
 
     # --- 저장 ---
 
+    def _managed_sheets(self):
+        """프로그램이 관리하는 시트(문서종류·품목·처리로그). 사용자가 만든 시트는 건드리지 않는다."""
+        names = [d.name for d in self.rules.doc_types] + [ITEMS_SHEET, LOG_SHEET]
+        return [self.wb[n] for n in names]
+
     def save(self):
-        for i, ws in enumerate(self.wb.worksheets):
-            _refresh_table(ws, f"Ledger_{i + 1}")
+        for ws in self.wb.worksheets:  # 이름 충돌이 없도록 우리 표를 먼저 전부 지운 뒤
+            for name in [t for t in ws.tables if t.startswith(TABLE_PREFIX)]:
+                del ws.tables[name]
+        for i, ws in enumerate(self._managed_sheets()):
+            _refresh_table(ws, f"{TABLE_PREFIX}{i + 1}")
         tmp = self.path.with_name(f".{self.path.stem}.tmp.xlsx")
+        backup = self.path.with_name(f"{self.path.stem}.bak{self.path.suffix}")
         try:
             self.wb.save(tmp)
+            if self.path.exists():  # openpyxl 은 차트·그림을 보존하지 못하므로 바로 전 판을 남긴다
+                shutil.copyfile(self.path, backup)
             os.replace(tmp, self.path)
         except PermissionError:
             raise LedgerLocked(str(self.path)) from None
@@ -169,6 +196,8 @@ def _append(ws, values):
     for name, value in values.items():
         if name not in header or value is None:
             continue
+        if isinstance(value, str):  # PDF 글자에 섞인 제어문자는 엑셀에 쓸 수 없다
+            value = ILLEGAL_CHARACTERS_RE.sub("", value)
         cell = ws.cell(r, header.index(name) + 1, value)
         if isinstance(value, datetime):
             cell.number_format = DATETIME_FORMAT
@@ -180,8 +209,6 @@ def _append(ws, values):
 
 def _refresh_table(ws, name):
     """엑셀 표(헤더 고정·필터)를 현재 열·행 범위로 다시 만든다."""
-    for old in list(ws.tables):
-        del ws.tables[old]
     width = len(_header(ws))
     last = max(_last_row(ws), 2)  # 데이터가 없어도 빈 행 하나를 둔다(엑셀 표 규칙)
     table = Table(displayName=name, ref=f"A1:{get_column_letter(width)}{last}")

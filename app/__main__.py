@@ -15,7 +15,7 @@ from pathlib import Path
 from app import config
 from app.extract import ExtractResult, extract
 from app.init import InitError, init
-from app.ledger import Ledger, LedgerLocked
+from app.ledger import Ledger, LedgerLocked, is_locked
 from app.log import append_log, summary
 from app.outlook import collect_from_outlook
 from app.organize import free_name, move_duplicate, move_review, move_success, render_filename, target_path
@@ -25,6 +25,11 @@ LOCKED_MESSAGE = (
     "누적장부.xlsx 가 엑셀에서 열려 있습니다. 엑셀을 닫고 다시 실행하세요.\n"
     "(파일은 하나도 옮기지 않았습니다. 받은문서에 그대로 있습니다.)"
 )
+LOG_LOCKED_MESSAGE = (
+    "처리로그.csv 가 다른 프로그램(엑셀 등)에서 열려 있습니다. 닫고 다시 실행하세요.\n"
+    "(파일은 하나도 옮기지 않았습니다.)"
+)
+HELD_REASON = "다른 프로그램(PDF 뷰어 등)에서 열려 있어 옮길 수 없음. 닫고 다시 실행하세요"
 
 
 def _now():
@@ -36,7 +41,7 @@ class _Item:
     """받은문서 PDF 한 건의 처리 계획."""
     src: Path
     result: ExtractResult
-    outcome: str = ""      # 성공 · 중복 · 확인필요
+    outcome: str = ""      # 성공 · 중복 · 확인필요 · 보류 · 이동 실패
     reason: str = ""
     dst: Path | None = None  # 성공일 때 옮길 곳
 
@@ -44,19 +49,26 @@ class _Item:
 def run(work: Path, rules, overwrite=False) -> int:
     """받은문서 처리. 순서: 전부 추출 → 장부 저장 1회 → 저장이 된 뒤에만 파일 이동."""
     inbox = work / config.INBOX
+    log_file = work / config.LOG_FILE
     pdfs = sorted(p for p in inbox.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
     if not pdfs:
         print(f"받은문서에 PDF 가 없습니다: {inbox}")
         print(summary([]))
         return 0
+    if is_locked(log_file):
+        print(LOG_LOCKED_MESSAGE)
+        return 2
 
     items = []
     for pdf in pdfs:
+        if is_locked(pdf):  # PDF 뷰어 등이 잡고 있으면 옮길 수 없으므로 장부에도 넣지 않는다
+            items.append(_Item(pdf, ExtractResult(doc_type=None), "보류", HELD_REASON))
+            continue
         try:
             result = extract(pdf, rules)
         except Exception as e:  # 깨진 PDF 한 건이 나머지를 막지 않게
             result = ExtractResult(doc_type=None, has_text=False)
-            items.append(_Item(pdf, result, "확인필요", f"PDF 를 읽지 못함 — {e}"))
+            items.append(_Item(pdf, result, "확인필요", f"PDF 를 읽지 못함: {e}"))
             continue
         items.append(_Item(pdf, result))
 
@@ -69,58 +81,91 @@ def run(work: Path, rules, overwrite=False) -> int:
         ledger.save()
     except LedgerLocked:
         for item in items:
-            append_log(work / config.LOG_FILE, when, item.src.name, "보류", "장부가 엑셀에서 열려 있음")
+            _log(log_file, when, item.src.name, "보류", "장부가 엑셀에서 열려 있음")
         print(LOCKED_MESSAGE)
         return 2
 
     for item in items:
         _move(item, work)
-        append_log(work / config.LOG_FILE, when, item.src.name, item.outcome, item.reason)
+        _log(log_file, when, item.src.name, item.outcome, item.reason)
 
     print()
     print(summary(i.outcome for i in items))
     if any(i.outcome == "확인필요" for i in items):
         print(f"확인필요 폴더의 .txt 를 열어 사유를 보세요: {work / config.REVIEW}")
+    if any(i.outcome in ("보류", "이동 실패") for i in items):
+        print("보류·이동 실패 파일은 받은문서에 그대로 있습니다. 열린 프로그램을 닫고 다시 실행하세요.")
     return 0
+
+
+def _log(log_file, when, name, outcome, reason):
+    try:
+        append_log(log_file, when, name, outcome, reason)
+    except OSError as e:
+        print(f"경고: 처리로그.csv 에 쓰지 못함 ({e}). 장부의 처리로그 시트에는 기록됨.")
 
 
 def _plan(items, ledger, work, overwrite, when):
     """각 건을 성공·중복·확인필요로 나누고 장부에 기록한다(아직 저장·이동은 안 함)."""
     seen, reserved = set(), set()
     for item in items:
-        if item.outcome:  # 이미 읽기 실패로 정해짐
+        if item.outcome:  # 이미 정해짐(보류·읽기 실패)
             continue
         result = item.result
         if result.review_reason:
             item.outcome, item.reason = "확인필요", result.review_reason
             continue
         key = (result.doc_type.name, str(result.number))
-        if key in seen or (ledger.is_duplicate(*key) and not overwrite):
-            item.outcome, item.reason = "중복", f"{key[0]} {key[1]} 이미 장부에 있음"
-            continue
-        if ledger.is_duplicate(*key):
-            ledger.remove(*key)
-            notes = ["덮어쓰기"]
-        else:
+        added = False
+        try:
+            if key in seen or (ledger.is_duplicate(*key) and not overwrite):
+                _plan_duplicate(item, ledger, work, key, seen)
+                continue
             notes = []
+            if ledger.is_duplicate(*key):
+                ledger.remove(*key)
+                notes.append("덮어쓰기")
+            item.dst = free_name(target_path(result, work), reserved)
+            ledger.add(result, item.src.name, item.dst.relative_to(work), processed_at=when)
+            added = True
+            seen.add(key)
+            reserved.add(item.dst)
+            item.outcome, item.reason = "성공", "; ".join(notes + result.warnings)
+        except Exception as e:  # 한 건의 오류가 나머지를 막지 않게: 기록을 되돌리고 확인필요로
+            if added or not ledger.is_duplicate(*key):
+                ledger.remove(*key)
+            item.dst = None
+            item.outcome, item.reason = "확인필요", f"처리 중 오류: {e}"
+
+
+def _plan_duplicate(item, ledger, work, key, seen):
+    recorded = ledger.organized_path(*key)
+    if key not in seen and recorded and not (work / recorded).exists():
+        # 지난번 이동이 실패해 장부에만 있는 문서: 중복으로 보내지 않고 장부에 적힌 자리로 옮긴다
+        item.dst = work / recorded
+        item.outcome, item.reason = "성공", "장부에는 있으나 정리문서에 파일이 없어 그 자리로 옮김"
         seen.add(key)
-        item.dst = free_name(target_path(result, work), reserved)
-        reserved.add(item.dst)
-        ledger.add(result, item.src.name, item.dst.relative_to(work), processed_at=when)
-        item.outcome, item.reason = "성공", "; ".join(notes + result.warnings)
+        return
+    item.outcome, item.reason = "중복", f"{key[0]} {key[1]} 이미 장부에 있음"
 
 
 def _move(item, work):
-    if item.outcome == "성공":
-        final = move_success(item.src, item.dst)
-        print(f"성공      {item.src.name} → {final.relative_to(work)}")
-    elif item.outcome == "중복":
-        move_duplicate(item.src, work)
-        print(f"중복      {item.src.name} → {config.INBOX}\\{config.DUPLICATES}\\")
-    else:
-        move_review(item.src, work, item.reason, item.result.text_head)
-        print(f"확인필요  {item.src.name} — {item.reason}")
-
+    try:
+        if item.outcome == "성공":
+            final = move_success(item.src, item.dst)
+            print(f"성공      {item.src.name} -> {final.relative_to(work)}")
+        elif item.outcome == "중복":
+            move_duplicate(item.src, work)
+            print(f"중복      {item.src.name} -> {config.INBOX}\\{config.DUPLICATES}\\")
+        elif item.outcome == "확인필요":
+            move_review(item.src, work, item.reason, item.result.text_head)
+            print(f"확인필요  {item.src.name} : {item.reason}")
+        else:
+            print(f"보류      {item.src.name} : {item.reason}")
+    except OSError as e:
+        recorded = " (장부에는 있음)" if item.outcome == "성공" else ""
+        item.outcome, item.reason = "이동 실패", f"이동 실패{recorded}: {e}"
+        print(f"이동 실패 {item.src.name} : 받은문서에 그대로 둠{recorded}")
 
 def _parser():
     p = argparse.ArgumentParser(prog="python -m app", description="PDF → 엑셀 장부 사무 자동화")
@@ -131,7 +176,17 @@ def _parser():
     return p
 
 
+def _utf8_console():
+    """출력이 파이프여도(Claude Code 가 실행할 때) 한글이 깨지거나 죽지 않게 utf-8 로 고정."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv=None, repo_root=config.REPO_ROOT) -> int:
+    _utf8_console()
     args = _parser().parse_args(argv)
     try:
         if args.command == "init":
