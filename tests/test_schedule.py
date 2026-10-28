@@ -348,7 +348,8 @@ def test_catch_up_command_runs_missed_jobs_and_notifies_after(env, monkeypatch, 
 @pytest.fixture
 def failures(monkeypatch):
     calls = []
-    monkeypatch.setattr(cli, "notify_failure", lambda what, message: calls.append((what, message)))
+    monkeypatch.setattr(cli, "notify_failure",
+                        lambda what, message, folder=None: calls.append((what, message, folder)))
     return calls
 
 
@@ -360,6 +361,7 @@ def test_auto_run_without_work_folder_setting_logs_and_notifies(tmp_path, failur
     record = (repo / "실행기록.txt").read_text(encoding="utf-8")
     assert "설치.bat" in record
     assert len(failures) == 1 and "설치.bat" in failures[0][1]
+    assert failures[0][2] == repo and str(repo / "실행기록.txt") in failures[0][1]  # 누르면 기록 폴더, 글에 기록 위치
     assert "Traceback" not in capsys.readouterr().out
 
 
@@ -383,6 +385,7 @@ def test_auto_run_with_broken_job_settings_logs_and_notifies(env, failures):
     record = (work / "실행기록.txt").read_text(encoding="utf-8")
     assert "설정이 깨져" in record
     assert len(failures) == 1 and "설정이 깨져" in failures[0][1] and "Code 탭" in failures[0][1]
+    assert failures[0][2] == work and str(work / "실행기록.txt") in failures[0][1]
 
 
 def test_auto_run_of_deleted_job_logs_and_notifies(env, failures):
@@ -417,3 +420,33 @@ def test_auto_run_unexpected_error_logs_and_notifies(env, failures, monkeypatch)
     assert main(["run", "1", "--자동"], repo_root=repo) != 0
     assert "예상 못 한 문제" in (work / "실행기록.txt").read_text(encoding="utf-8")
     assert len(failures) == 1
+
+
+def test_catch_up_keeps_going_after_unexpected_error(env, failures, monkeypatch):
+    """한 작업이 예상 못 한 오류로 멈춰도 다음 작업을 돌리고, 결과 알림과 실패 알림을 둘 다 띄운다."""
+    repo, work, inp, out = env
+    first = _new(repo, inp, out, title="가")
+    second = _new(repo, inp, out, title="나")
+    for job in (first, second):
+        job.run_time = "00:00"
+        save_job(job)
+    from app.job_run import RunReport
+    ran, notified = [], []
+
+    def fake_run(job, work, **kw):
+        ran.append(job.number)
+        if job.number == 1:
+            raise RuntimeError("예상 못 한 문제")
+        job.last_run = datetime.now().date().isoformat()
+        save_job(job)
+        report = RunReport(message="나: 성공 1")
+        report.counts["성공"] = 1
+        return report
+
+    monkeypatch.setattr(cli, "run_job", fake_run)
+    monkeypatch.setattr(cli, "notify_report", lambda job, report: notified.append(job.number))
+    assert main(["catch-up"], repo_root=repo) != 0
+    assert ran == [1, 2]
+    assert notified == [2]
+    assert len(failures) == 1 and "01_가" in failures[0][1] and "예상 못 한 문제" in failures[0][1]
+    assert "예상 못 한 문제" in (first.folder / "실행기록.txt").read_text(encoding="utf-8")

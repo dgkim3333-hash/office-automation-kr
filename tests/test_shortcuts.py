@@ -31,6 +31,21 @@ def test_quote_doubles_single_quotes():
     assert powershell.quote("C:\\O'Neil 폴더") == "'C:\\O''Neil 폴더'"
 
 
+def test_quote_doubles_typographic_single_quotes():
+    """PowerShell 은 ‘ ’ ‚ ‛ 도 작은따옴표로 본다."""
+    assert powershell.quote("O\u2019Neil \u2018a\u2019 \u201ab \u201bc") == (
+        "'O\u2019\u2019Neil \u2018\u2018a\u2019\u2019 \u201a\u201ab \u201b\u201bc'")
+
+
+def test_title_with_typographic_quote_is_quoted_safely(fake_ps, tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    odd = create_job(tmp_path / "work", "O\u2019Neil 주문", inp, out, "누적장부")
+    shortcuts.job_shortcuts(odd, tmp_path / "repo", tmp_path / "desk")
+    assert "O\u2019\u2019Neil 주문.lnk'" in fake_ps.having("'run 01'")[0]
+
+
 def test_desktop_dir_follows_what_windows_says(fake_ps, tmp_path):
     moved = tmp_path / "OneDrive" / "바탕 화면"
     fake_ps.outputs["'Desktop'"] = f"{moved}\r\n"

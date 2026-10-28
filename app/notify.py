@@ -58,7 +58,10 @@ def toast_script(title: str, body: str, folder: Path | None) -> str:
         "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument",
         f"$xml.LoadXml({q(xml)})",
         "$toast = New-Object Windows.UI.Notifications.ToastNotification $xml",
-        f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier({q(APP_ID)}).Show($toast)",
+        f"$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier({q(APP_ID)})",
+        # 사용자나 회사 정책이 알림을 꺼 두면 Show 는 성공해도 아무것도 안 보인다. 그러면 실패로 돌려 메시지 창으로
+        "if ($n.Setting -ne 'Enabled') { throw \"Windows 알림이 꺼져 있음($($n.Setting))\" }",
+        "$n.Show($toast)",
     ])
 
 

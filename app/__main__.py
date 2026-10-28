@@ -379,9 +379,11 @@ def _automatic(args, repo_root) -> int:
 
 
 def _auto_failed(log_dir, what: str, message: str, detail: str = "") -> int:
+    """기록하고 알린다. 알림 글에 기록 파일 위치를 넣고, 누르면 그 폴더가 열린다."""
     print(message)
+    record = Path(log_dir) / RUN_RECORD
     _append_record(log_dir, f"{what} 실패", message + (f"\n{detail}" if detail else ""))
-    notify_failure(what, message)
+    notify_failure(what, f"{message}\n기록: {record}", folder=Path(log_dir))
     return 1
 
 
@@ -402,10 +404,19 @@ def _auto_run(work, key) -> int:
 def _catch_up(work, what: str) -> int:
     """오늘 시각이 지났는데 아직 안 돈 작업을 차례로 실행한다. 알림은 모두 끝난 뒤에 띄운다
     (메시지 창으로 대신할 때 창이 다음 작업 실행을 막지 않게)."""
-    finished = []
+    finished, failed = [], []
 
     def runner(job):
-        report = run_job(job, work, gate=approval_gate)
+        try:
+            report = run_job(job, work, gate=approval_gate)
+        except (JobLocked, JobError):
+            raise  # 실행 중 · 그새 지워진 작업: schedule.catch_up 이 건너뛴다
+        except Exception as e:  # 한 작업의 예상 못 한 오류가 다음 작업과 앞 작업의 알림을 막지 않게
+            detail = "".join(traceback.format_exception(e))
+            print(f"{job.name}: 예상하지 못한 오류로 멈췄습니다: {e}")
+            _append_run_record(job, "놓친 실행 실패", f"예상하지 못한 오류로 멈췄습니다: {e}\n{detail}")
+            failed.append(f"{job.name}: 예상하지 못한 오류로 멈췄습니다: {e} (기록: {Path(job.folder) / RUN_RECORD})")
+            return
         print(report.message)
         _append_run_record(job, "놓친 실행", report.message)
         finished.append((job, report))
@@ -416,10 +427,13 @@ def _catch_up(work, what: str) -> int:
             notify_report(job, report)
     if not ran:
         print("지금 실행할 놓친 작업이 없습니다.")
+    problems = list(failed)
     broken = broken_jobs(work)
     if broken:
         lines = "\n".join(f"{folder.name}: {reason}" for folder, reason in broken)
-        return _auto_failed(work, what, f"설정이 깨진 작업이 있어 실행하지 못했습니다.\n{lines}\n{JOB_FIX_HINT}")
+        problems.append(f"설정이 깨진 작업이 있어 실행하지 못했습니다.\n{lines}\n{JOB_FIX_HINT}")
+    if problems:  # 결과 알림을 먼저 띄운 뒤, 실패는 한 번에 모아 알린다
+        return _auto_failed(work, what, "\n".join(problems))
     return 1 if any(report.stopped for _, report in finished) else 0
 
 

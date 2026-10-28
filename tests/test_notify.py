@@ -147,3 +147,24 @@ def test_unmatched_xls_counted_separately_and_hinted(job):
     report = run_job(job, job.folder.parent.parent)
     assert report.unmatched_old == 2 and report.unmatched_xls == 1
     assert "옛 엑셀(.xls) 1개" in report.message and ".xlsx 로 다시 저장" in report.message
+
+
+def test_toast_checks_notifications_are_enabled():
+    """사용자 · 그룹 정책이 알림을 꺼 두면 Show 는 성공해도 아무것도 안 보이므로, 설정을 보고 꺼져 있으면 실패로."""
+    script = notify.toast_script("사무자동화", "본문", None)
+    assert "$n.Setting" in script and "'Enabled'" in script and "throw" in script
+    assert script.index("$n.Setting") < script.index("$n.Show(")
+
+
+def test_notifications_turned_off_falls_back_to_box(job, fake_ps):
+    fake_ps.fail.append("$n.Setting")  # 알림 꺼짐 → 스크립트가 throw → 반환 코드 1
+    boxes = []
+    notify.notify_report(job, _report(성공=1), box=lambda *a: boxes.append(a))
+    assert len(fake_ps.having("ToastNotificationManager")) == 1
+    assert boxes == [("사무자동화", "일일 PO 정리: 결과 1건")]
+
+
+def test_notify_failure_click_opens_log_folder(tmp_path):
+    calls = []
+    notify.notify_failure("작업 1 자동 실행", "고칠 것", toast=lambda *a: calls.append(a), folder=tmp_path)
+    assert calls[0][2] == tmp_path

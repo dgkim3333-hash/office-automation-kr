@@ -5,12 +5,14 @@
 - 스크립트 안의 오류는 모두 멈춤 오류로 바꾸고, 잡아서 오류 글자를 stderr 에 쓴 뒤 반환 코드 1 로 끝낸다.
 """
 import base64
+import re
 import subprocess
 from dataclasses import dataclass
 
 EXE = "powershell.exe"  # Windows PowerShell 5.1: WinRT 알림 · ScheduledTasks 모듈이 기본으로 있다
 TIMEOUT = 120
 # 진행 표시(「모듈을 준비하는 중」)가 오류 출력에 섞이지 않게 끈다
+_SINGLE_QUOTES = re.compile("['‘’‚‛]")
 PRELUDE = ("$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n"
            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n")
 
@@ -28,8 +30,8 @@ def default_run(args, **kwargs):
 
 
 def quote(text) -> str:
-    """PowerShell 작은따옴표 문자열(안의 ' 는 '' 로)."""
-    return "'" + str(text).replace("'", "''") + "'"
+    """PowerShell 작은따옴표 문자열. PowerShell 은 ' 뿐 아니라 ‘ ’ ‚ ‛ 도 작은따옴표로 보므로 모두 두 번 쓴다."""
+    return "'" + _SINGLE_QUOTES.sub(lambda m: m.group(0) * 2, str(text)) + "'"
 
 
 def command(script: str) -> list[str]:
