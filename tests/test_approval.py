@@ -12,6 +12,7 @@ import app.job_run as job_run
 from app.approval import REQUIRED, approval_gate, approve, form_fingerprint, form_key
 from app.job_run import JobLocked, check_file_info, job_lock, load_records, run_job
 from app.jobs import create_job, load_job, save_job
+from app.markup import write_example_markup
 from app.master import write_example
 from app.rules import RuleError, load_rules
 from app.verify import Check
@@ -35,6 +36,7 @@ def env(tmp_path):
     for d in (work, inp, out):
         d.mkdir()
     write_example(work / "고객마스터.xlsx")
+    write_example_markup(work / "마크업표.xlsx")
     job = create_job(work, TITLE, inp, out, "둘다")
     shutil.copy(EXAMPLE_RULES, job.rules_path)
     return work, inp, out, job

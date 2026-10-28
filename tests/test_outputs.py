@@ -8,6 +8,7 @@ import pytest
 
 from app.excel_extract import read_excel
 from app.extract import extract
+from app.markup import load_markup, write_example_markup
 from app.master import load_master, lookup, write_example
 from app.outputs import (company_rows, extract_result_rows, read_back, write_check_file, write_company_form,
                          write_extract_result)
@@ -34,6 +35,13 @@ def master(tmp_path_factory):
     return load_master(path)
 
 
+@pytest.fixture(scope="module")
+def markup(tmp_path_factory):
+    path = tmp_path_factory.mktemp("k") / "마크업표.xlsx"
+    write_example_markup(path)
+    return load_markup(path)
+
+
 def _same(a, b):
     if hasattr(a, "year") and hasattr(b, "year"):
         return (a.year, a.month, a.day) == (b.year, b.month, b.day)
@@ -50,9 +58,9 @@ def _sheet(path, name):
 
 
 @pytest.mark.parametrize("order, expected", CASES)
-def test_company_rows_match_expected_form(rules, master, order, expected):
+def test_company_rows_match_expected_form(rules, master, markup, order, expected):
     result = read_excel(SAMPLES / "01_고객오더_엑셀" / order, rules)
-    header, rows = company_rows(result, lookup(master, result.fields["고객명"]), rules.company_form)
+    header, rows = company_rows(result, lookup(master, result.fields["고객명"]), rules.company_form, markup)
     exp_header, exp_rows = _sheet(SAMPLES / "02_회사양식_변환" / expected, "SO_Upload")
     assert header == list(exp_header)
     assert len(rows) == len(exp_rows)
@@ -62,9 +70,9 @@ def test_company_rows_match_expected_form(rules, master, order, expected):
 
 
 @pytest.mark.parametrize("order, expected", CASES)
-def test_written_company_form_file(rules, master, tmp_path, order, expected):
+def test_written_company_form_file(rules, master, markup, tmp_path, order, expected):
     result = read_excel(SAMPLES / "01_고객오더_엑셀" / order, rules)
-    path = write_company_form(tmp_path, result, lookup(master, result.fields["고객명"]), rules.company_form)
+    path = write_company_form(tmp_path, result, lookup(master, result.fields["고객명"]), rules.company_form, markup)
     assert path.name == expected
     got_header, got_rows = _sheet(path, "SO_Upload")
     exp_header, exp_rows = _sheet(SAMPLES / "02_회사양식_변환" / expected, "SO_Upload")
@@ -117,11 +125,11 @@ def test_check_file_has_one_row_per_check(rules, tmp_path):
     assert rows[3][:3] == ("1줄 금액", "2 x 3 = 6", "7")
 
 
-def test_read_back_matches_company_form(rules, master, tmp_path):
+def test_read_back_matches_company_form(rules, master, markup, tmp_path):
     result = read_excel(SAMPLES / "01_고객오더_엑셀" / CASES[0][0], rules)
     row = lookup(master, result.fields["고객명"])
-    path = write_company_form(tmp_path, result, row, rules.company_form)
-    header, rows = company_rows(result, row, rules.company_form)
+    path = write_company_form(tmp_path, result, row, rules.company_form, markup)
+    header, rows = company_rows(result, row, rules.company_form, markup)
     assert read_back(path, rules.company_form.sheet, header, rows) == []
 
 
@@ -135,11 +143,11 @@ def test_read_back_matches_extract_result(rules, tmp_path):
     assert read_back(path, "추출결과", header, rows) == []
 
 
-def test_read_back_reports_changed_cell(rules, master, tmp_path):
+def test_read_back_reports_changed_cell(rules, master, markup, tmp_path):
     result = read_excel(SAMPLES / "01_고객오더_엑셀" / CASES[0][0], rules)
     row = lookup(master, result.fields["고객명"])
-    path = write_company_form(tmp_path, result, row, rules.company_form)
-    header, rows = company_rows(result, row, rules.company_form)
+    path = write_company_form(tmp_path, result, row, rules.company_form, markup)
+    header, rows = company_rows(result, row, rules.company_form, markup)
     wb = openpyxl.load_workbook(path)
     ws = wb[rules.company_form.sheet]
     column = header.index("Unit Price") + 1

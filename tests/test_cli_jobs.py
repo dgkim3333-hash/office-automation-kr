@@ -175,12 +175,14 @@ def test_init_makes_jobs_folder_and_master_only(tmp_path, capsys):
     shutil.copytree(REPO / "rules", repo / "rules")
     work = tmp_path / "사무자동화"
     assert main(["init", str(work)], repo_root=repo) == 0
-    assert sorted(p.name for p in work.iterdir()) == ["고객마스터.xlsx", "작업"]
+    assert sorted(p.name for p in work.iterdir()) == ["고객마스터.xlsx", "마크업표.xlsx", "작업"]
     assert (repo / "작업폴더.txt").read_text(encoding="utf-8").strip() == str(work.resolve())
 
-    (work / "고객마스터.xlsx").write_bytes(b"mine")  # 사용자가 채운 고객마스터는 그대로
+    (work / "고객마스터.xlsx").write_bytes(b"mine")  # 사용자가 채운 고객마스터 · 마크업표는 그대로
+    (work / "마크업표.xlsx").write_bytes(b"my markup")
     assert main(["init", str(work)], repo_root=repo) == 0
     assert (work / "고객마스터.xlsx").read_bytes() == b"mine"
+    assert (work / "마크업표.xlsx").read_bytes() == b"my markup"
 
 
 def test_old_inbox_flow_is_gone():

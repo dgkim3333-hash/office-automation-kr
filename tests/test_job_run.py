@@ -17,6 +17,7 @@ from app.job_run import (
     RECORD_FILE, JobLocked, RunReport, file_fingerprint, job_lock, load_records, rules_fingerprint, run_job,
 )
 from app.jobs import create_job, load_job
+from app.markup import write_example_markup
 from app.master import write_example
 from app.verify import Check
 
@@ -71,6 +72,7 @@ def env(tmp_path):
     for d in (work, inp, out):
         d.mkdir()
     write_example(work / "고객마스터.xlsx")
+    write_example_markup(work / "마크업표.xlsx")
     return work, inp, out
 
 

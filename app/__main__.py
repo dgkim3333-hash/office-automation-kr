@@ -31,10 +31,11 @@ from app.job_run import COMPANY_MODES, LEDGER_MODES, MASTER_PREFIX, JobLocked, j
 from app.notify import notify_failure, notify_report
 from app.jobs import JOBS_DIR, JobError, broken_jobs, create_job, find_job, list_jobs, save_job
 from app.local_guard import BANNER, LocalOnlyError, block_network, check_environment, check_work_dir
+from app.markup import MARKUP_FILE, MarkupError, load_markup, markup_checks, missing_parts, written_markup
 from app.master import MasterError, load_master, lookup
 from app.organize import free_name
 from app.outlook import collect_from_outlook
-from app.outputs import _mark, company_form_name
+from app.outputs import _mark, company_form_name, company_rows
 from app.rules import RuleError, load_rules
 from app.verify import failed, verify
 
@@ -565,11 +566,11 @@ def _item_columns(result, rules):
 
 
 def _check_company_form(result, rules, work):
-    """회사 양식: 고객마스터에서 고객을 찾았는지(양식이 고객마스터 값을 쓸 때), 몇 줄로 만들어질지."""
+    """회사 양식: 고객마스터에서 고객을 찾았는지(양식이 고객마스터 값을 쓸 때), 마크업(쓸 때), 몇 줄로 만들어질지."""
     form = rules.company_form
+    row = None
     if any(c.source.startswith(MASTER_PREFIX) for c in form.columns):
         customer = result.fields.get("고객명")
-        row = None
         try:
             row = lookup(load_master(Path(work) / config.MASTER_FILE), customer) if work else None
         except MasterError as e:
@@ -578,7 +579,34 @@ def _check_company_form(result, rules, work):
             print(f"고객마스터: 찾음 (고객코드 {row.get('고객코드')})")
         else:
             print(f"고객마스터: 없음 ('{customer}' 줄을 고객마스터.xlsx 에 더해야 회사 양식이 만들어집니다)")
+    if form.uses_markup:
+        _check_markup(result, form, row, work)
     print(f"회사 양식: {company_form_name(result, form)} ({len(result.table or [])}줄)")
+
+
+def _check_markup(result, form, master_row, work):
+    """마크업표: 빠진 파트가 있는지, 줄마다 마크업% · 본사 단가 · 본사 금액(실행 때와 같은 계산 · 검산)."""
+    try:
+        if not work:
+            raise MarkupError(f"작업 폴더를 몰라 {MARKUP_FILE} 를 읽지 못했습니다")
+        table = load_markup(Path(work) / MARKUP_FILE)
+    except MarkupError as e:
+        print(f"\n마크업표: {e}")
+        print("이대로 실행하면 이 문서는 확인필요로 갑니다.")
+        return
+    missing = missing_parts(result, form, table)
+    if missing:
+        print(f"\n마크업표: 없는 파트넘버 {', '.join(missing)} ({MARKUP_FILE} 에 더해야 회사 양식이 만들어집니다. "
+              "이대로 실행하면 확인필요)")
+        return
+    _, rows = company_rows(result, master_row, form, table)
+    checks = markup_checks(result, written_markup(form, rows), table, form.markup)
+    print("\n| 마크업 검산 | 계산 | 결과 | 일치 |\n|---|---|---|---|")
+    for c in checks:
+        print(f"| {_cell(c.item)} | {_cell(c.source)} | {_cell(c.output)} | {_mark(c.ok)} |")
+    bad = len(failed(checks))
+    if bad:
+        print(f"\n확인필요: 마크업 검산 불일치 {bad}건. 이대로 실행하면 이 문서는 확인필요로 갑니다.")
 
 
 if __name__ == "__main__":

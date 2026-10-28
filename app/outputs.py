@@ -10,6 +10,7 @@ from openpyxl.styles import Font
 
 from app.excel_extract import excel_number
 from app.ledger import AMOUNT_FORMAT, DATE_FORMAT, DATETIME_FORMAT, fit_columns
+from app.markup import markup_value
 from app.organize import free_name, render_text
 
 LINE_STEP = 10  # 줄번호: 10, 20, 30 …
@@ -20,7 +21,7 @@ def _number(value) -> Decimal:
     return excel_number(value) if isinstance(value, float) else Decimal(str(value))
 
 
-def _value(source, result, item, master_row, index):
+def _value(source, result, item, master_row, index, form=None, markup=None):
     if source == "줄번호":
         return (index + 1) * LINE_STEP
     if source == "빈칸":
@@ -37,14 +38,17 @@ def _value(source, result, item, master_row, index):
         return (item or {}).get(name)
     if group == "고객마스터":
         return (master_row or {}).get(name)
+    if group == "마크업":
+        return markup_value(source, item, form.markup, markup)
     return None
 
 
-def company_rows(result, master_row, form):
-    """회사 양식의 머리글과 행(품목 한 줄 = 한 행)."""
+def company_rows(result, master_row, form, markup=None):
+    """회사 양식의 머리글과 행(품목 한 줄 = 한 행). markup = 마크업표(load_markup), 마크업.* 열이 있을 때 쓴다."""
     header = [c.name for c in form.columns]
     items = result.table or []
-    rows = [[_value(c.source, result, item, master_row, i) for c in form.columns] for i, item in enumerate(items)]
+    rows = [[_value(c.source, result, item, master_row, i, form, markup) for c in form.columns]
+            for i, item in enumerate(items)]
     return header, rows
 
 
@@ -61,9 +65,16 @@ def _write_sheet(ws, header, rows):
             elif isinstance(cell.value, date):
                 cell.number_format = DATE_FORMAT
             elif isinstance(cell.value, Decimal):
-                cell.number_format = AMOUNT_FORMAT
+                cell.number_format = _amount_format(cell.value)
     ws.freeze_panes = "A2"
     fit_columns(ws)
+
+
+def _amount_format(value: Decimal) -> str:
+    """금액 서식. 소수 자리가 2 보다 많으면 그 자리까지 보이게(본사 단가 0.103 이 0.10 으로 보이지 않게)."""
+    exponent = value.normalize().as_tuple().exponent if value.is_finite() else 0
+    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    return AMOUNT_FORMAT if places <= 2 else "#,##0." + "0" * places
 
 
 def _save(wb, folder, name) -> Path:
@@ -74,9 +85,9 @@ def _save(wb, folder, name) -> Path:
     return path
 
 
-def company_workbook(result, master_row, form):
+def company_workbook(result, master_row, form, markup=None):
     """회사 양식 통합문서(저장 전). 저장 위치 · 이름은 부르는 쪽이 정한다."""
-    header, rows = company_rows(result, master_row, form)
+    header, rows = company_rows(result, master_row, form, markup)
     wb = openpyxl.Workbook()
     wb.active.title = form.sheet
     _write_sheet(wb.active, header, rows)
@@ -87,8 +98,8 @@ def company_form_name(result, form) -> str:
     return render_text(form.filename_tpl, result.fields)
 
 
-def write_company_form(folder, result, master_row, form) -> Path:
-    return _save(company_workbook(result, master_row, form), folder, company_form_name(result, form))
+def write_company_form(folder, result, master_row, form, markup=None) -> Path:
+    return _save(company_workbook(result, master_row, form, markup), folder, company_form_name(result, form))
 
 
 def extract_result_rows(result, source_name):

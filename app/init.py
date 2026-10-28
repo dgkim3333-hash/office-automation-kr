@@ -1,9 +1,10 @@
-"""설치.bat 본체: 작업 폴더를 고르고 빈 구조(작업\\ · 고객마스터.xlsx)를 만든다. 폴더 고르기 창도 여기 있다."""
+"""설치.bat 본체: 작업 폴더를 고르고 빈 구조(작업\\ · 고객마스터.xlsx · 마크업표.xlsx)를 만든다. 폴더 고르기 창도 여기 있다."""
 from pathlib import Path
 
 from app import config
 from app.jobs import JOBS_DIR
 from app.local_guard import LocalOnlyError, check_work_dir
+from app.markup import MARKUP_FILE, write_example_markup
 from app.master import write_example
 
 
@@ -51,7 +52,7 @@ def _is_inside(path: Path, parent: Path) -> bool:
 
 
 def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_work_folder) -> Path:
-    """작업 폴더에 작업\\ 과 고객마스터.xlsx(없을 때만)를 만들고 위치를 작업폴더.txt 에 적는다.
+    """작업 폴더에 작업\\ 과 고객마스터.xlsx · 마크업표.xlsx(없을 때만)를 만들고 위치를 작업폴더.txt 에 적는다.
     작업마다의 폴더 · 규칙은 job new 가 만든다."""
     repo_root = Path(repo_root).resolve()
     if work_dir is None:
@@ -73,6 +74,9 @@ def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_work_f
     master = work_dir / config.MASTER_FILE
     if not master.exists():  # 있으면 사용자가 채운 것이므로 건드리지 않는다
         write_example(master)
+    markup = work_dir / MARKUP_FILE
+    if not markup.exists():  # 마크업표도 친구가 채운 것이면 그대로 둔다
+        write_example_markup(markup)
     config.work_dir_file(repo_root).write_text(str(work_dir) + "\n", encoding="utf-8")
 
     print(f"작업 폴더: {work_dir}")

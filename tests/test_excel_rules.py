@@ -38,12 +38,15 @@ def test_example_company_form():
     assert form.sheet == "SO_Upload"
     assert form.filename_tpl == "회사양식_SO입력_{고객PO번호}.xlsx"
     names = [c.name for c in form.columns]
-    assert len(names) == 19 and names[0] == "Order Date" and names[-1] == "Remarks"
+    assert len(names) == 22 and names[0] == "Order Date" and names[18] == "Remarks"
+    assert names[19:] == ["HQ Unit Price", "HQ Amount", "Markup %"]  # 본사 PO 시트용 마크업 열(설계 13-2)
     sources = {c.name: c.source for c in form.columns}
     assert sources["Customer Code"] == "고객마스터.고객코드"
     assert sources["Line No"] == "줄번호"
     assert sources["Ext Price"] == "수량x단가"
     assert sources["Remarks"] == "빈칸"
+    assert [sources[n] for n in names[19:]] == ["마크업.단가", "마크업.금액", "마크업.율"]
+    assert form.uses_markup
 
 
 def test_rules_without_excel_sections_still_load(tmp_path):

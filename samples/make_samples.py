@@ -56,6 +56,20 @@ PARTS = {
     "VTS-FLT-50": ("Inline Particle Filter 50 um", Decimal("140.00")),
 }
 
+# 마크업표 (가짜, app/markup.py 의 EXAMPLE_ROWS 와 같아야 한다): 품번 → (마크업%, 반올림자리 또는 None)
+# 본사 단가 = 고객 단가 x (1 + 마크업% / 100), 반올림자리가 있는 파트만 그 자리에서 사사오입. 본사 금액 = 수량 x 본사 단가
+MARKUP = {
+    "VTS-CDU-300": (Decimal("3"), None), "VTS-RDHX-42U": (Decimal("3"), None), "VTS-MFD-12": (Decimal("2"), None),
+    "VTS-QD-DN25": (Decimal("3"), None), "VTS-SENS-LEAK": (Decimal("0"), None), "VTS-CHL-500RT": (Decimal("2"), None),
+    "VTS-PMP-CDU-K": (Decimal("3"), None), "VTS-FLT-50": (Decimal("2"), 2),
+}
+
+def hq_price(pn, up):
+    from decimal import ROUND_HALF_UP
+    rate, places = MARKUP[pn]
+    v = up * (1 + rate / 100)
+    return v if places is None else v.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+
 # ---------- 거래 2건 ----------
 ORDERS = [
     {
@@ -286,7 +300,8 @@ def make_customer_po(o):
 # ---------- 2. 회사 입력 양식 (본사 시스템 업로드용 — 열 고정) ----------
 SO_COLS = ["Order Date", "Customer Code", "Customer Name", "Customer PO No", "Line No", "Part No",
            "Description", "Qty", "UoM", "Unit Price", "Ext Price", "Currency", "Requested Ship Date",
-           "Incoterms", "Payment Terms", "Ship-To Address", "Customer Contact", "Entered By", "Remarks"]
+           "Incoterms", "Payment Terms", "Ship-To Address", "Customer Contact", "Entered By", "Remarks",
+           "HQ Unit Price", "HQ Amount", "Markup %"]
 
 def make_company_so(o):
     cu = CUSTOMERS[o["cust"]]
@@ -297,13 +312,16 @@ def make_company_so(o):
         desc, up = PARTS[pn]
         vals = [o["po_date"], cu["code"], cu["name"], o["po"], i*10, pn, desc, q, "EA", float(up), float(up*q),
                 o["currency"], o["req_date"], o["incoterms"], o["terms"], cu["ship"].replace("\n", ", "),
-                cu["contact"], "KR-Branch / D. Lee", ""]
+                cu["contact"], "KR-Branch / D. Lee", "",
+                float(hq_price(pn, up)), float(hq_price(pn, up) * q), float(MARKUP[pn][0])]
         for j, v in enumerate(vals, 1):
             c = ws.cell(row=i+1, column=j, value=v); c.border = BORDER
         ws.cell(row=i+1, column=1).number_format = "yyyy-mm-dd"
         ws.cell(row=i+1, column=13).number_format = "yyyy-mm-dd"
         ws.cell(row=i+1, column=10).number_format = "#,##0.00"
         ws.cell(row=i+1, column=11).number_format = "#,##0.00"
+        ws.cell(row=i+1, column=20).number_format = "#,##0.00"
+        ws.cell(row=i+1, column=21).number_format = "#,##0.00"
     n = len(o["lines"]) + 1
     t = Table(displayName="SO_Upload", ref=f"A1:{get_column_letter(len(SO_COLS))}{n}")
     t.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
@@ -315,7 +333,9 @@ def make_company_so(o):
         ("Customer PO No", "고객 발주번호 — 그대로 복사"), ("Line No", "10, 20, 30 … 10단위"),
         ("Part No", "당사 부품번호. 고객 품번이 다르면 품번 매핑표 참조"), ("Qty/UoM", "수량과 단위(EA)"),
         ("Unit Price / Ext Price", "달러. Ext = 단가×수량"), ("Requested Ship Date", "고객 납기요청일"),
-        ("Incoterms / Payment Terms", "고객 PO 또는 계약조건"), ("Entered By", "지사 입력자")], 1):
+        ("Incoterms / Payment Terms", "고객 PO 또는 계약조건"), ("Entered By", "지사 입력자"),
+        ("HQ Unit Price / HQ Amount", "본사 단가 = Unit Price x (1 + Markup % / 100), HQ Amount = Qty x 본사 단가 (마크업표)"),
+        ("Markup %", "마크업표의 그 파트 마크업% (3 = 3%)")], 1):
         ws2.cell(row=r, column=1, value=k); ws2.cell(row=r, column=2, value=v)
     style_header(ws2, 1, 2); autowidth(ws2)
     path = os.path.join(OUT, "02_회사양식_변환", f"회사양식_SO입력_{o['po']}.xlsx")

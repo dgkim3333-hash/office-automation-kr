@@ -26,7 +26,7 @@ Code 세션은 이 폴더를 저장소 `samples/` 로 그대로 옮겨 쓴다 (�
 ### 02_회사양식_변환 — 본사 시스템 업로드용 SO 입력 양식 (열 고정)
 | 파일 | 특징 |
 |---|---|
-| 회사양식_SO입력_PO-ACME-2026-0417.xlsx | 시트 `SO_Upload`: 한 행 = 품목 1줄, 19개 열 고정 (Order Date · Customer Code · Customer PO No · Line No(10단위) · Part No · Qty · Unit Price · Ext Price · Requested Ship Date · Incoterms · Payment Terms …). 시트 `열설명` 포함 |
+| 회사양식_SO입력_PO-ACME-2026-0417.xlsx | 시트 `SO_Upload`: 한 행 = 품목 1줄, 22개 열 고정 (Order Date · Customer Code · Customer PO No · Line No(10단위) · Part No · Qty · Unit Price · Ext Price · Requested Ship Date · Incoterms · Payment Terms … · 맨 뒤 본사용 HQ Unit Price · HQ Amount · Markup %). 시트 `열설명` 포함. 본사 단가는 가짜 마크업표(app/markup.py 예시: 0 · 2 · 3%, VTS-FLT-50 만 소수 2자리 반올림)로 계산 |
 | 회사양식_SO입력_HDC-PUR-26-0908.xlsx | 같은 양식 |
 
 → 01 의 고객 양식을 이 양식으로 옮기는 것이 "발주 → 엑셀 정리 → 시스템 입력" 업무의 자동화 대상이다. Customer Code 는 고객마스터(가짜: 02 안 `열설명` 참조)에서 가져온다.

@@ -22,7 +22,7 @@ def repo(tmp_path):
 def test_creates_jobs_folder_and_master_only(tmp_path, repo):
     work = tmp_path / "사무자동화"
     init(work_dir=work, repo_root=repo)
-    assert sorted(p.name for p in work.iterdir()) == ["고객마스터.xlsx", "작업"]
+    assert sorted(p.name for p in work.iterdir()) == ["고객마스터.xlsx", "마크업표.xlsx", "작업"]
     assert (work / "작업").is_dir()
 
 
@@ -30,8 +30,10 @@ def test_keeps_existing_master_and_jobs(tmp_path, repo):
     work = tmp_path / "사무자동화"
     (work / "작업" / "01_일일 정리").mkdir(parents=True)
     (work / "고객마스터.xlsx").write_bytes(b"mine")
+    (work / "마크업표.xlsx").write_bytes(b"my markup")
     init(work_dir=work, repo_root=repo)
     assert (work / "고객마스터.xlsx").read_bytes() == b"mine"
+    assert (work / "마크업표.xlsx").read_bytes() == b"my markup"
     assert (work / "작업" / "01_일일 정리").is_dir()
 
 

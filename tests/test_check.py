@@ -100,6 +100,9 @@ def test_check_excel_shows_head_items_master_and_form(setup, capsys):
     assert "품목 4줄" in out
     assert "| 1 | VTS-CDU-300 |" in out
     assert "고객마스터: 찾음 (고객코드 C-KR-0417)" in out
+    assert "| 마크업 검산 | 계산 | 결과 | 일치 |" in out  # 예시 마크업표(init 이 만든 것)로 줄마다 본사 단가
+    assert "| 1줄 마크업% (VTS-CDU-300) | 마크업표 3% | 3 | 일치 |" in out
+    assert "| 1줄 본사 단가 | 48500 x (100 + 3) / 100 = 49955 | 49955.00 | 일치 |" in out
     assert "회사 양식: 회사양식_SO입력_PO-ACME-2026-0417.xlsx (4줄)" in out
     assert _snapshot(work) == before  # 아무것도 만들거나 옮기지 않음
 

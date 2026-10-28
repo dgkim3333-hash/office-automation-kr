@@ -24,6 +24,9 @@ from app.jobs import Job, JobError, _folder_title, list_jobs, load_job, save_job
 from app.ledger import ITEMS_SHEET, Ledger, LedgerLocked, is_locked
 from app.local_guard import LocalOnlyError, check_work_dir
 from app.log import append_log
+from app.markup import (
+    MARKUP_FILE, MarkupError, markup_checks, markup_from_bytes, markup_stamp, missing_parts, written_markup,
+)
 from app.master import MasterError, load_master, lookup
 from app.organize import free_name
 from app.outputs import (
@@ -63,10 +66,14 @@ KEEP_HINT = "입력 폴더에서 원본을 치우세요(그대로 두면 날마�
 REMAKE_HINT = "그러면 내일 실행 때(또는 규칙.yaml 을 고친 뒤) 새로 만듭니다(처리기록은 고칠 필요 없음)."
 STAMP_FORM = "form_fingerprint"  # 승인대기 대조표 속성: 만들 때의 양식 지문
 STAMP_FILE = "file_fingerprint"  # 승인대기 대조표 속성: 만들 때의 복사본 지문
+STAMP_MARKUP = "markup_fingerprint"  # 승인대기 대조표 속성: 그 문서가 쓰는 마크업표 줄들의 지문(마크업을 쓸 때만)
 REMADE_RULES = "규칙이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 REMADE_MISSING = "대조표가 없어 새로 만들었습니다. 보고 승인하세요"
 NOT_DETECTED_WAITING = "승인대기의 이 파일을 지금 규칙으로 알아보지 못했습니다. 규칙을 고치거나 복사본을 지워 거절하세요"
 REMADE_FILE = "승인대기의 파일이 대조표를 만든 뒤 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
+REMADE_MARKUP = "마크업표에서 이 문서 파트의 마크업이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
+MARKUP_MISSING = ("마크업표에 없는 파트넘버: {parts}. {file} 에 이 파트 줄(파트넘버 · 마크업%)을 더하면 "
+                  "다음 실행 때 다시 시도합니다(0% 면 0 을 적으세요)")
 APPROVAL_RETRY_NOTE = ("고친 뒤(규칙.yaml · 고객마스터 등) 다시 승인하면 다시 확인합니다. "
                        f"승인하지 않을 문서면 {WAITING} 폴더의 그 복사본을 지우세요.")
 
@@ -384,6 +391,10 @@ class _Run:
         self.remade: list[str] = []          # 승인 실행에서 대조표를 새로 만든 문서
         self.rejected = None                 # 지금 처리하는 파일이 승인하지 않은 문서면 그 승인대기 기록
         self.form_fps: dict[str, str] = {}
+        self.markup_used = False             # 회사 양식이 마크업.* 열을 쓰고 이번 실행이 회사 양식을 만든다
+        self.markup_bytes: bytes | None = None  # 실행 시작 때 한 번 읽은 마크업표.xlsx(없거나 못 읽으면 None)
+        self.markup_read_error = ""
+        self.markup_table = None
 
     # 준비
 
@@ -426,6 +437,9 @@ class _Run:
             return self._stop(
                 f"출력 방식이 '{self.job.output_mode}' 인데 규칙.yaml 에 회사양식이 없습니다. "
                 f"Code 탭에서 「{self.job.title} 작업 규칙 고쳐 줘」라고 말해 회사양식을 적거나, 출력 방식을 '누적장부' 로 바꾸세요.")
+        self.markup_used = self.job.output_mode in COMPANY_MODES and self.rules.company_form.uses_markup
+        if self.markup_used:
+            self._read_markup(raw)
         try:
             self.state = _current_state(load_records(self.job))
         except (OSError, UnicodeDecodeError, csv.Error) as e:
@@ -467,6 +481,35 @@ class _Run:
 
     def _candidates(self):
         return _documents(self.source)
+
+    def _read_markup(self, rules_raw: bytes):
+        """마크업표.xlsx 를 한 번 읽고, 규칙지문에 그 내용을 섞는다. 마크업표가 바뀌면 같은 날이라도 확인필요 문서를
+        다시 시도하게(빠진 파트를 더한 뒤 바로 다시 실행). 승인 수(양식 지문)에는 넣지 않는다(설계 13-2)."""
+        path = self.work / MARKUP_FILE
+        try:
+            self.markup_bytes = path.read_bytes()
+            marker = b"file\0" + self.markup_bytes
+        except FileNotFoundError:
+            self.markup_read_error = f"{MARKUP_FILE} 가 없습니다: {path}"
+            marker = b"missing"
+        except OSError as e:
+            self.markup_read_error = f"{MARKUP_FILE} 를 읽지 못했습니다(엑셀에서 열려 있으면 닫으세요): {e}"
+            marker = b"unreadable"
+        self.rules_fp = hashlib.sha256(rules_raw + b"\0markup\0" + marker).hexdigest()[:16]
+
+    def _markup(self):
+        """이번 실행의 마크업표(처음 쓸 때 만든다). 쓸 수 없으면 MarkupError."""
+        if self.markup_bytes is None:
+            raise MarkupError(self.markup_read_error)
+        if self.markup_table is None:
+            if self.markup_read_error:
+                raise MarkupError(self.markup_read_error)
+            try:
+                self.markup_table = markup_from_bytes(self.markup_bytes)
+            except MarkupError as e:  # 다음 문서마다 다시 읽지 않게 오류도 기억한다
+                self.markup_read_error = str(e)
+                raise
+        return self.markup_table
 
     def _scan_waiting(self):
         """승인대기에 있는 복사본들의 지문. 승인하지 않은 문서(복사본을 지움)인지 가릴 때 쓴다."""
@@ -571,6 +614,25 @@ class _Run:
                 self._review(path, fp, result, (
                     f"고객마스터에 '{customer}' 가 없습니다. 고객마스터.xlsx 에 이 고객 줄을 더한 뒤 다시 넣으세요"))
                 return
+        markup = None
+        if self.markup_used:
+            try:
+                markup = self._markup()
+            except MarkupError as e:
+                self._review(path, fp, result, str(e))
+                return
+            missing = missing_parts(result, form, markup)
+            if missing:  # 0% 로 넘기지 않는다
+                self._review(path, fp, result, MARKUP_MISSING.format(parts=", ".join(missing), file=MARKUP_FILE))
+                return
+            _, rows = company_rows(result, master_row, form, markup)
+            more = markup_checks(result, written_markup(form, rows), markup, form.markup)
+            bad = failed(more)
+            if bad:
+                self._review(path, fp, result, "마크업 검산 불일치: " + "; ".join(
+                    f"{c.item} (계산 {c.source}, 결과 {c.output})" for c in bad))
+                return
+            checks = checks + more  # 대조표 · 검산 파일에 줄마다 마크업% 와 본사 단가가 보이게
         if self.approving:
             reason = self._unseen(path, fp, result)
             if reason:  # 친구가 대조표에서 본 값이 아니므로 내보내지 않는다
@@ -580,7 +642,7 @@ class _Run:
             # 승인하지 않은 문서를 다시 처리하면 승인 수와 상관없이 늘 승인대기로(자동 실행이 내보내지 않음)
             self._to_waiting(path, fp, result, checks)
             return
-        self._write(path, fp, result, key, checks, master_row)
+        self._write(path, fp, result, key, checks, master_row, markup)
 
     # 승인대기 대조표
 
@@ -596,7 +658,10 @@ class _Run:
         return self.form_fps[key]
 
     def _stamps(self, fp, result) -> dict:
-        return {STAMP_FORM: self._form_fp(result), STAMP_FILE: fp}
+        stamps = {STAMP_FORM: self._form_fp(result), STAMP_FILE: fp}
+        if self.markup_used and self.markup_table is not None:
+            stamps[STAMP_MARKUP] = markup_stamp(result, self.rules.company_form, self.markup_table)
+        return stamps
 
     def _unseen(self, path, fp, result) -> str | None:
         """이 복사본의 대조표가 지금 값과 같은 규칙 · 같은 파일로 만든 것인지. 아니면 그 사유."""
@@ -606,6 +671,9 @@ class _Run:
         now = self._stamps(fp, result)
         if any(stamps == now for _, stamps in entries):
             return None
+        if STAMP_MARKUP in now and any(stamps.get(STAMP_FILE) == fp and stamps.get(STAMP_FORM) == now[STAMP_FORM]
+                                       for _, stamps in entries):
+            return REMADE_MARKUP  # 규칙 · 파일은 그대로, 이 문서 파트의 마크업만 바뀜
         if any(stamps.get(STAMP_FILE) == fp for _, stamps in entries):
             return REMADE_RULES
         return REMADE_FILE
@@ -669,7 +737,7 @@ class _Run:
             self._record(path, fp, result, "보류")
         self._done(path, "보류", LEDGER_LOCKED_REASON)
 
-    def _write(self, path, fp, result, key, checks, master_row):
+    def _write(self, path, fp, result, key, checks, master_row, markup=None):
         """출력: 누적장부 · 회사 양식. 저장한 뒤 다시 읽어 다르면 이번 건만 되돌리고 확인필요.
 
         여기까지 왔으면 처리기록에는 이 (문서종류, 번호)의 성공이 없다. 그런데 결과가 이미 있으면
@@ -713,7 +781,7 @@ class _Run:
                 except Exception as e:
                     problems.append(f"저장한 누적장부를 다시 읽지 못함: {e}")
             if mode in COMPANY_MODES and not problems:
-                company, more = self._write_company(final, result, master_row, form)
+                company, more = self._write_company(final, result, master_row, form, markup)
                 problems += more
         except _StopRun:
             raise
@@ -759,7 +827,7 @@ class _Run:
         name = row.get("파일") if row.get("상태") == "승인대기" and row.get("파일") else path.name
         return name, Path(self.job.input_dir) / name
 
-    def _write_company(self, final, result, master_row, form):
+    def _write_company(self, final, result, master_row, form, markup=None):
         """회사 양식을 임시 이름으로 저장 → 다시 읽어 대조 → 같을 때만 최종 이름으로 바꾼다.
 
         다시 읽기를 통과하지 않은 파일이 최종 이름으로 보이는 일이 없다. (만든 파일 또는 None, 문제 목록)
@@ -767,8 +835,8 @@ class _Run:
         tmp = final.with_name(f".{final.stem}.tmp{final.suffix}")
         problems = []
         try:
-            company_workbook(result, master_row, form).save(tmp)
-            header, rows = company_rows(result, master_row, form)
+            company_workbook(result, master_row, form, markup).save(tmp)
+            header, rows = company_rows(result, master_row, form, markup)
             try:
                 problems += read_back(tmp, form.sheet, header, rows)
             except Exception as e:

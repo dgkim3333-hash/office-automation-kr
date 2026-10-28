@@ -15,6 +15,7 @@ import pytest
 
 from app.job_run import load_records, run_job
 from app.jobs import create_job
+from app.markup import write_example_markup
 from app.master import write_example
 
 REPO = Path(__file__).resolve().parent.parent
@@ -33,6 +34,7 @@ def env(tmp_path):
     for d in (work, out, pdf_in, excel_in):
         d.mkdir()
     write_example(work / "고객마스터.xlsx")
+    write_example_markup(work / "마크업표.xlsx")
     for folder, files in ((pdf_in, PDFS.glob("*.pdf")), (excel_in, ORDERS.glob("*.xlsx"))):
         for f in files:
             dst = folder / f.name

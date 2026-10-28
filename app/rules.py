@@ -80,7 +80,19 @@ class ExcelForm:
 @dataclass
 class CompanyColumn:
     name: str
-    source: str  # 머리.X · 품목.X · 고객마스터.X · 줄번호 · 수량x단가 · 고정:글자 · 빈칸
+    source: str  # 머리.X · 품목.X · 고객마스터.X · 마크업.단가 · 마크업.금액 · 마크업.율 · 줄번호 · 수량x단가 · 고정:글자 · 빈칸
+
+
+MARKUP_PREFIX = "마크업."
+MARKUP_KEYS = (("품번열", "part"), ("단가열", "price"), ("수량열", "quantity"))
+
+
+@dataclass
+class MarkupColumns:
+    """마크업 계산에 쓰는 품목 열 이름(회사양식.마크업: {품번열, 단가열, 수량열})."""
+    part: str = "품번"
+    price: str = "단가"
+    quantity: str = "수량"
 
 
 @dataclass
@@ -88,6 +100,12 @@ class CompanyForm:
     filename_tpl: str
     sheet: str
     columns: list[CompanyColumn]
+    markup: MarkupColumns = field(default_factory=MarkupColumns)
+
+    @property
+    def uses_markup(self) -> bool:
+        """열 값에 마크업.* 를 쓰는가(그때만 마크업표.xlsx 가 필요하다)."""
+        return any(c.source.startswith(MARKUP_PREFIX) for c in self.columns)
 
 
 @dataclass
@@ -131,11 +149,14 @@ def rules_from_text(text: str) -> Rules:
             raise RuleError(
                 f"엑셀양식 이름 '{name}' 이 문서종류 이름과 같습니다. 승인 수를 양식 이름으로 세므로 "
                 f"엑셀양식 이름을 다르게 지으세요(예: 고객 이름).")
+    excel_forms = [_excel_form(str(name), body, by_name) for name, body in excel.items()]
+    company = _company_form(data.get("회사양식"))
+    _check_markup_columns(company, excel_forms)
     return Rules(
         doc_types,
         _sheet_order(data.get("시트순서"), [d.name for d in doc_types]),
-        [_excel_form(str(name), body, by_name) for name, body in excel.items()],
-        _company_form(data.get("회사양식")),
+        excel_forms,
+        company,
         data,
     )
 
@@ -143,7 +164,7 @@ def rules_from_text(text: str) -> Rules:
 CELL = re.compile(r"^[A-Z]{1,3}[1-9][0-9]*$")
 COLUMN = re.compile(r"^[A-Z]{1,3}$")
 RIGHT_OF = "오른쪽:"
-COMPANY_VALUE = re.compile(r"^((머리|품목|고객마스터)\.\S+|줄번호|수량x단가|빈칸|고정:.*)$", re.S)
+COMPANY_VALUE = re.compile(r"^((머리|품목|고객마스터)\.\S+|마크업\.(단가|금액|율)|줄번호|수량x단가|빈칸|고정:.*)$", re.S)
 
 
 def _excel_form(name, body, doc_types) -> ExcelForm:
@@ -209,10 +230,44 @@ def _company_form(spec) -> CompanyForm | None:
         if not COMPANY_VALUE.match(source):
             raise RuleError(
                 f"{where} 열 '{name}' 의 값 '{source}' 를 알 수 없습니다. "
-                "머리.이름 · 품목.이름 · 고객마스터.열 · 줄번호 · 수량x단가 · 고정:글자 · 빈칸 중 하나로 적으세요."
+                "머리.이름 · 품목.이름 · 고객마스터.열 · 마크업.단가 · 마크업.금액 · 마크업.율 · 줄번호 · 수량x단가 · "
+                "고정:글자 · 빈칸 중 하나로 적으세요."
             )
         columns.append(CompanyColumn(name, source))
-    return CompanyForm(str(spec["파일명"]), str(spec.get("시트") or "Sheet1"), columns)
+    return CompanyForm(str(spec["파일명"]), str(spec.get("시트") or "Sheet1"), columns,
+                       _markup_columns(where, spec.get("마크업")))
+
+
+def _markup_columns(where, spec) -> MarkupColumns:
+    """회사양식.마크업: {품번열, 단가열, 수량열}. 없으면 품번 · 단가 · 수량."""
+    if spec is None:
+        return MarkupColumns()
+    allowed = [k for k, _ in MARKUP_KEYS]
+    if not isinstance(spec, dict) or not spec:
+        raise RuleError(f"{where} 마크업은 {{품번열: 품번, 단가열: 단가, 수량열: 수량}} 처럼 적어야 합니다.")
+    for key, value in spec.items():
+        if key not in allowed:
+            raise RuleError(f"{where} 마크업의 '{key}' 는 쓸 수 없습니다. 품번열 · 단가열 · 수량열만 됩니다.")
+        if _blank(value):
+            raise RuleError(f"{where} 마크업의 {key} 에 품목 열 이름을 적으세요.")
+    return MarkupColumns(**{attr: str(spec[key]) for key, attr in MARKUP_KEYS if key in spec})
+
+
+def _check_markup_columns(company, excel_forms):
+    """마크업에 쓰는 품목 열이 엑셀양식 품목 열에 있어야 한다(없으면 모든 파트가 「마크업표에 없음」이 된다)."""
+    if company is None or not company.uses_markup:
+        return
+    needed = [("품번열", company.markup.part), ("단가열", company.markup.price)]
+    if any(c.source == "마크업.금액" for c in company.columns):
+        needed.append(("수량열", company.markup.quantity))
+    for form in excel_forms:
+        if form.items is None:
+            continue
+        for key, name in needed:
+            if name not in form.items.columns:
+                raise RuleError(
+                    f"[회사양식] 마크업에 쓰는 {key} '{name}' 가 엑셀양식 {form.name} 의 품목 열에 없습니다. "
+                    f"회사양식 아래에 마크업: {{{key}: 열이름}} 처럼 실제 품목 열 이름을 적으세요.")
 
 
 def _sheet_order(spec, names) -> list[str]:
