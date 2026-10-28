@@ -1,5 +1,6 @@
 """install.ps1 (한 줄 자동 설치) 검사. 실제 프로그램 설치는 -DryRun 으로 건너뛴다."""
 import hashlib
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -237,3 +238,51 @@ def test_setup_wrappers(name, part):
     )
     out = subprocess.run(PS + ["-Command", check], capture_output=True, text=True, timeout=60)
     assert out.stdout.strip() == "0", out.stdout + out.stderr
+
+# --- 업데이트 때 새 판에서 빠진 옛 파일 정리 ---
+
+def _zip_with_extra(repo_zip, tmp_path, extra_name):
+    """repo_zip 에 프로그램 파일 하나(extra_name)를 더한 '옛 판' 압축 파일."""
+    old = tmp_path / "old.zip"
+    shutil.copy(repo_zip, old)
+    with zipfile.ZipFile(old, "a") as z:
+        z.writestr(f"office-automation-kr-main/{extra_name}", "옛 판에만 있던 파일")
+    return old
+
+
+def test_update_removes_files_dropped_from_new_version(tmp_path, repo_zip):
+    install_dir = tmp_path / "dev"
+    common = ("-DryRun", "-Part", "program", "-InstallDir", str(install_dir),
+              "-WorkDir", str(tmp_path / "사무자동화"), "-ClaudeHome", str(tmp_path / "ch"))
+    old_zip = _zip_with_extra(repo_zip, tmp_path, "docs/옛장.md")
+    assert _run_like_irm("-RepoZip", str(old_zip), *common).returncode == 0
+    repo = install_dir / "office-automation-kr-main"
+    assert (repo / "docs" / "옛장.md").exists()
+    (repo / "내메모.txt").write_text("지우면 안 됨", encoding="utf-8")
+
+    proc = _run_like_irm("-RepoZip", str(repo_zip), *common)
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
+    assert not (repo / "docs" / "옛장.md").exists()        # 새 판에 없는 프로그램 파일은 지움
+    assert (repo / "내메모.txt").exists()                    # 내가 넣은 파일은 그대로
+    assert (repo / "작업폴더.txt").exists() and (repo / "run.bat").exists()
+    assert "옛 파일 1개" in out
+
+
+def test_update_without_list_removes_only_known_renamed_chapters(tmp_path, repo_zip):
+    install_dir = tmp_path / "dev"
+    common = ("-DryRun", "-Part", "program", "-RepoZip", str(repo_zip), "-InstallDir", str(install_dir),
+              "-WorkDir", str(tmp_path / "사무자동화"), "-ClaudeHome", str(tmp_path / "ch"))
+    assert _run_like_irm(*common).returncode == 0
+    repo = install_dir / "office-automation-kr-main"
+    (repo / ".installed-files.txt").unlink()  # 목록을 남기기 전에 설치한 PC 흉내
+    for old in ("02_설치.md", "03_첫_실행_10분.md", "08_선택_엑셀PO변환.md"):
+        (repo / old).write_text("옛 장", encoding="utf-8")
+    (repo / "내메모.txt").write_text("지우면 안 됨", encoding="utf-8")
+
+    assert _run_like_irm(*common).returncode == 0
+    for old in ("02_설치.md", "03_첫_실행_10분.md", "08_선택_엑셀PO변환.md"):
+        assert not (repo / old).exists(), old
+    assert (repo / "내메모.txt").exists()
+    assert (repo / "08_선택_Outlook_자동수집.md").exists()   # 새 판의 같은 번호 장은 남음
+    assert (repo / ".installed-files.txt").exists()          # 이번에 목록이 생김

@@ -145,6 +145,29 @@ function Install-UvFromZip($binDir, [switch]$NoPath) {
     if (-not $NoPath) { Add-UserPath $binDir }
 }
 
+# 업데이트 때 정리: 지난번에 설치한 파일 목록(.installed-files.txt)에 있었는데 새 판에 없는 파일만 지운다.
+# 목록에 없는 파일(작업폴더.txt, .venv, 사용자가 넣은 파일)은 건드리지 않는다.
+$ManifestName = '.installed-files.txt'
+# 목록이 생기기 전(2026-10-28 장 번호 변경 전)에 설치한 PC 용: 이름이 바뀐 옛 장 파일만
+$LegacyFiles = @(
+    '02_설치.md', '03_첫_실행_10분.md', '04_내_양식_가르치기.md', '05_매일_쓰기.md',
+    '06_프로젝트와_예정됨.md', '07_선택_Outlook_자동수집.md', '08_선택_엑셀PO변환.md'
+)
+
+function Remove-StaleFiles($repo, $newFiles) {
+    $manifest = Join-Path $repo $ManifestName
+    $old = $LegacyFiles
+    if (Test-Path -LiteralPath $manifest) { $old = @(Get-Content -LiteralPath $manifest -Encoding UTF8) }
+    $count = 0
+    foreach ($rel in $old) {
+        if (-not $rel -or ($newFiles -contains $rel)) { continue }
+        if ($rel -match '\.\.' -or [IO.Path]::IsPathRooted($rel)) { continue }  # 이상한 줄은 건드리지 않음
+        $path = Join-Path $repo $rel
+        if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force; $count++ }
+    }
+    return $count
+}
+
 function Get-UvMethods {
     [ordered]@{
         'uv-공식스크립트' = {
@@ -201,10 +224,16 @@ try {
         Get-File $RepoZip $zip
         $fresh = Expand-ToTemp $zip
         Remove-Item -LiteralPath $zip -Force
-        Get-ChildItem -LiteralPath (Join-Path $fresh 'office-automation-kr-main') -Force |
-            Copy-Item -Destination $repo -Recurse -Force
+        $freshRoot = Join-Path $fresh 'office-automation-kr-main'
+        $newFiles = @(Get-ChildItem -LiteralPath $freshRoot -Recurse -File -Force |
+            ForEach-Object { $_.FullName.Substring($freshRoot.Length + 1) })
+        $removed = Remove-StaleFiles $repo $newFiles
+        Get-ChildItem -LiteralPath $freshRoot -Force | Copy-Item -Destination $repo -Recurse -Force
+        [IO.File]::WriteAllLines((Join-Path $repo $ManifestName), [string[]]$newFiles, (New-Object Text.UTF8Encoding $false))
         Remove-Item -LiteralPath $fresh -Recurse -Force -ErrorAction SilentlyContinue
-        if ($hadBefore) { Done "새 판으로 바꿨습니다. $repo (작업 폴더와 내 파일은 그대로)" }
+        $cleaned = ''
+        if ($removed -gt 0) { $cleaned = ", 옛 파일 $($removed)개 정리" }
+        if ($hadBefore) { Done "새 판으로 바꿨습니다. $repo (작업 폴더와 내 파일은 그대로$cleaned)" }
         else { Done "받았습니다. $repo" }
 
         Step 5 '작업 폴더 (처음 한 번은 1~3분 걸립니다)'
