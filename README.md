@@ -12,7 +12,7 @@
 [Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://raw.githubusercontent.com/dgkim3333-hash/office-automation-kr/main/install.ps1 | iex
 ```
 
-Claude Desktop → Node.js → uv·uvx → 이 프로그램 → 작업 폴더(`C:\사무자동화`)까지 자동으로 설치됩니다. 그다음은 [02장](02_설치.md) 2절.
+Claude Desktop → Node.js → uv·uvx → 이 프로그램 → 작업 폴더(`C:\사무자동화`) → Claude 기본 약속(전역 `CLAUDE.md`)까지 자동으로 설치됩니다. 그다음은 [02장](02_설치.md) 2절.
 
 ## 무엇을 해 주나
 
@@ -52,6 +52,7 @@ Windows 10 · 11, Claude **Pro 이상** 요금제, 프로그램 설치 권한.
 | 이름 | 무엇 |
 |---|---|
 | `install.ps1` | 한 줄 자동 설치 |
+| `claude\전역_CLAUDE.md` | Claude 기본 약속. 설치 때 `C:\Users\내이름\.claude\CLAUDE.md` 로 복사(이미 있으면 건드리지 않음) |
 | `run.bat` | 받은문서 처리 (매일) |
 | `설치.bat` | 작업 폴더를 바꿀 때 |
 | `수집.bat` | (선택) Outlook 첨부 자동 저장, 07장 |

@@ -60,6 +60,7 @@ office-automation-kr/
   samples/                  가짜 샘플 세트(README_샘플설명.md 참고): PDF 6종 · 고객 PO 엑셀 · 회사 SO 양식 · 기대 장부 + make_samples.py(재생성용)
   tests/
   install.ps1               한 줄 자동 설치(irm | iex). 이미 있는 것은 건너뜀. BOM 없는 UTF-8
+  claude/전역_CLAUDE.md     사용자 PC 의 전역 CLAUDE.md 템플릿(한국어·회사 문서 지키기·위험한 일은 먼저 묻기). 설치 6단계에서 없을 때만 복사
   run.bat                   uv run python -m app
   설치.bat                  uv run python -m app init  (작업 폴더 선택·생성, 4-1절)
   pyproject.toml            의존성: pdfplumber · openpyxl · PyYAML · (dev) pytest · reportlab · pywin32(선택)

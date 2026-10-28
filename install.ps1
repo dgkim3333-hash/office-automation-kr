@@ -1,19 +1,21 @@
 # office-automation-kr 자동 설치
 # 사용법(PowerShell 에 한 줄 붙여 넣기):
 #   [Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://raw.githubusercontent.com/dgkim3333-hash/office-automation-kr/main/install.ps1 | iex
-# 순서: 1 Claude Desktop → 2 Node.js → 3 uv·uvx → 4 이 저장소 → 5 작업 폴더. 이미 있는 것은 건너뛴다.
+# 순서: 1 Claude Desktop → 2 Node.js → 3 uv·uvx → 4 이 저장소 → 5 작업 폴더 → 6 기본 약속(전역 CLAUDE.md).
+# 이미 있는 것은 건너뛴다. 전역 CLAUDE.md 가 이미 있으면 절대 건드리지 않는다.
 param(
     [switch]$DryRun,  # 시험용: 1~3 단계 설치를 건너뜀
     [string]$RepoZip = 'https://github.com/dgkim3333-hash/office-automation-kr/archive/refs/heads/main.zip',
     [string]$InstallDir = 'C:\dev',
-    [string]$WorkDir = 'C:\사무자동화'
+    [string]$WorkDir = 'C:\사무자동화',
+    [string]$ClaudeHome = (Join-Path $env:USERPROFILE '.claude')  # 시험용으로 바꿀 수 있음
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 
-function Step($n, $text) { Write-Host ''; Write-Host "[$n/5] $text" -ForegroundColor Cyan }
+function Step($n, $text) { Write-Host ''; Write-Host "[$n/6] $text" -ForegroundColor Cyan }
 function Done($text) { Write-Host "      $text" -ForegroundColor Green }
 
 function Update-SessionPath {
@@ -124,6 +126,18 @@ try {
     Push-Location -LiteralPath $repo
     try { & uv run python -m app init $WorkDir; $code = $LASTEXITCODE } finally { Pop-Location }
     if ($code -ne 0) { throw '작업 폴더를 만들지 못했습니다.' }
+
+    Step 6 '기본 약속 (전역 CLAUDE.md)'
+    $globalFile = Join-Path $ClaudeHome 'CLAUDE.md'
+    $template = Join-Path $repo 'claude\전역_CLAUDE.md'
+    if ($DryRun -and -not $PSBoundParameters.ContainsKey('ClaudeHome')) { Done '(시험 실행) 건너뜀' }
+    elseif (Test-Path -LiteralPath $globalFile) { Done "이미 있어서 건드리지 않았습니다. $globalFile" }
+    elseif (-not (Test-Path -LiteralPath $template)) { Done '약속 파일이 없어 건너뜀' }
+    else {
+        New-Item -ItemType Directory -Force -Path $ClaudeHome | Out-Null
+        Copy-Item -LiteralPath $template -Destination $globalFile
+        Done "만들었습니다. $globalFile"
+    }
 
     Write-Host ''
     Write-Host '끝났습니다.' -ForegroundColor Green
