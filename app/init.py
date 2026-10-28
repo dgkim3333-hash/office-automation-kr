@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 from app import config
+from app.local_guard import LocalOnlyError, check_work_dir
 
 SUBFOLDERS = [config.INBOX, f"{config.INBOX}/{config.DUPLICATES}", config.ORGANIZED, config.REVIEW]
 
@@ -57,6 +58,11 @@ def init(work_dir=None, repo_root=config.REPO_ROOT, ask=input, pick=_pick_folder
             "저장소 폴더 안은 작업 폴더로 쓸 수 없습니다. ZIP 을 새로 받을 때 데이터가 지워질 수 있습니다.\n"
             "문서 폴더 같은 다른 곳을 고르세요."
         )
+
+    try:
+        check_work_dir(work_dir)
+    except LocalOnlyError as e:
+        raise InitError(str(e)) from None
 
     for sub in SUBFOLDERS:
         (work_dir / sub).mkdir(parents=True, exist_ok=True)

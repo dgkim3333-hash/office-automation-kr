@@ -16,6 +16,7 @@ from app import config
 from app.extract import ExtractResult, extract
 from app.init import InitError, init
 from app.ledger import Ledger, LedgerLocked, is_locked
+from app.local_guard import BANNER, LocalOnlyError, block_network, check_environment, check_work_dir
 from app.log import append_log, summary
 from app.outlook import collect_from_outlook
 from app.organize import free_name, move_duplicate, move_review, move_success, render_filename, target_path
@@ -189,10 +190,26 @@ def main(argv=None, repo_root=config.REPO_ROOT) -> int:
     _utf8_console()
     args = _parser().parse_args(argv)
     try:
+        check_environment()
+    except LocalOnlyError as e:
+        print(e)
+        return 1
+    print(BANNER)
+    print()
+    restore_network = block_network()
+    try:
+        return _dispatch(args, repo_root)
+    finally:
+        restore_network()
+
+
+def _dispatch(args, repo_root) -> int:
+    try:
         if args.command == "init":
             init(repo_root=repo_root)
             return 0
         work = config.work_dir(repo_root)
+        check_work_dir(work)
         if args.command == "outlook":
             collect_from_outlook(work / config.INBOX)
             return 0
@@ -203,7 +220,7 @@ def main(argv=None, repo_root=config.REPO_ROOT) -> int:
                 return 1
             return check(Path(args.target), rules)
         return run(work, rules, overwrite=args.overwrite)
-    except (config.ConfigError, InitError) as e:
+    except (config.ConfigError, InitError, LocalOnlyError) as e:
         print(e)
         return 1
     except RuleError as e:
