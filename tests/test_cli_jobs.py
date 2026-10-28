@@ -67,7 +67,7 @@ def test_job_new_then_list(env, capsys):
                 repo_root=repo)
     lines = capsys.readouterr().out.strip().splitlines()
     assert code == 0
-    assert lines[-1] == f"작업 만듦: 01_{TITLE} (매일 16:00)"
+    assert f"작업 만듦: 01_{TITLE} (매일 16:00)" in lines  # 그 뒤에 자동 실행 방법 · 바로가기 줄이 온다(W7)
     job = find_job(work, "1")
     assert job.output_mode == "둘다" and job.input_dir == inp.resolve()
     # 예시 규칙이 아니라 Claude 가 채울 빈 뼈대. 아직 규칙으로 읽히지 않아도 작업은 만들어진다

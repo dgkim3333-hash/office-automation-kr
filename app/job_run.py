@@ -79,6 +79,7 @@ class JobLocked(Exception):
 class RunReport:
     counts: dict[str, int] = field(default_factory=lambda: dict.fromkeys(COUNT_KEYS, 0))
     unmatched_old: int = 0
+    unmatched_xls: int = 0       # unmatched_old 중 옛 엑셀(.xls): 어느 작업도 읽지 못하므로 .xlsx 로 다시 저장해야 함
     message: str = ""
     output_files: list[Path] = field(default_factory=list)
     ledger_locked: bool = False  # 누적장부가 엑셀에서 열려 있어 보류한 파일이 있음
@@ -121,7 +122,10 @@ def _unlock(f):
 @contextmanager
 def job_lock(job: Job):
     """작업 폴더의 실행중.lock 을 잡는다. 이미 누가 잡고 있으면 JobLocked."""
-    f = open(Path(job.folder) / LOCK_FILE, "a+b")
+    try:
+        f = open(Path(job.folder) / LOCK_FILE, "a+b")
+    except FileNotFoundError:  # 그새 작업 폴더가 지워졌거나(job delete) 옮겨짐
+        raise JobError(f"작업이 지워졌습니다({job.name}). 지금 있는 작업은 job list 로 보세요.") from None
     try:
         try:
             _lock(f)
@@ -252,9 +256,14 @@ def waiting_checks(job: Job) -> dict[str, list[tuple[Path, dict]]]:
 
 def unmatched_old(job: Job, work: Path, now: datetime) -> int:
     """입력 폴더에 하루 넘게 남아 있고, 같은 입력 폴더를 쓰는 어느 작업의 처리기록에도 없는 파일 수."""
+    return len(unmatched_files(job, work, now))
+
+
+def unmatched_files(job: Job, work: Path, now: datetime) -> list[Path]:
+    """unmatched_old 가 세는 파일들(옛 엑셀 .xls 를 따로 세려고 목록으로 돌려준다)."""
     folder = Path(job.input_dir)
     if not folder.is_dir():
-        return 0
+        return []
     jobs = [j for j in list_jobs(work) if _same_dir(j.input_dir, folder)]
     if not any(_same_dir(j.folder, job.folder) for j in jobs):
         jobs.append(job)
@@ -264,18 +273,18 @@ def unmatched_old(job: Job, work: Path, now: datetime) -> int:
             known |= {r.get("지문") for r in load_records(j)}
         except (OSError, UnicodeDecodeError, csv.Error):
             pass
-    count = 0
-    for path in folder.iterdir():
+    found = []
+    for path in sorted(folder.iterdir()):
         if not (path.is_file() and path.suffix.lower() in UNMATCHED_SUFFIXES and not path.name.startswith("~$")):
             continue
         try:
             if now.timestamp() - path.stat().st_mtime <= UNMATCHED_SECONDS:
                 continue
             if file_fingerprint(path) not in known:
-                count += 1
+                found.append(path)
         except OSError:
             continue
-    return count
+    return found
 
 
 def _documents(folder) -> list[Path]:
@@ -447,7 +456,9 @@ class _Run:
             except OSError as e:
                 self.warnings.append(f"경고: 작업설정.yaml 에 마지막 실행 날짜를 쓰지 못함 ({e})")
         try:
-            self.report.unmatched_old = unmatched_old(self.job, self.work, self.now)
+            files = unmatched_files(self.job, self.work, self.now)
+            self.report.unmatched_old = len(files)
+            self.report.unmatched_xls = sum(1 for p in files if p.suffix.lower() == ".xls")
         except Exception as e:  # 마지막 집계가 실패해도 이번 실행 결과(보고)는 잃지 않는다
             self.warnings.append(f"경고: 입력 폴더에 남은 파일을 세지 못함 ({e})")
         self.report.ledger_locked = self.ledger_locked
@@ -869,4 +880,7 @@ class _Run:
         if self.report.unmatched_old:
             lines.append(f"어느 작업에도 맞지 않는 파일 {self.report.unmatched_old}개가 입력 폴더에 하루 넘게 "
                          f"남아 있습니다: {self.job.input_dir}")
+        if self.report.unmatched_xls:
+            lines.append(f"그중 옛 엑셀(.xls) {self.report.unmatched_xls}개: 엑셀에서 열어 .xlsx 로 다시 저장하세요"
+                         "(「다른 이름으로 저장」 → Excel 통합 문서).")
         return "\n".join(lines + self.warnings)

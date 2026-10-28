@@ -632,7 +632,7 @@ def test_scan_errors_become_warnings(env, monkeypatch):
     def broken(*a, **k):
         raise OSError("입력 폴더를 읽을 수 없음")
 
-    monkeypatch.setattr(job_run, "unmatched_old", broken)
+    monkeypatch.setattr(job_run, "unmatched_files", broken)
     report = run_job(job, work)
     assert report.counts["성공"] == 1 and "입력 폴더를 읽을 수 없음" in report.message
 
