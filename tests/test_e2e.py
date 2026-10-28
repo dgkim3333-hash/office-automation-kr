@@ -1,6 +1,6 @@
-"""03장 '첫 실행 10분' 과 같은 시나리오: samples/03_Invoice_DM_PDF 6종 → run → 폴더·장부·로그 검증.
+"""PDF 만 넣은 시나리오: samples/03_Invoice_DM_PDF 6종 → run → 폴더·장부·로그 검증.
 
-기대 장부는 samples/04_장부_엑셀/누적장부_기대결과.xlsx (PO 는 2차 범위라 제외).
+기대 장부는 samples/04_장부_엑셀/누적장부_기대결과.xlsx (PDF 만 넣으므로 PO 는 제외). 엑셀 PO 는 test_e2e_excel.py.
 """
 import csv
 import shutil
@@ -171,4 +171,4 @@ def test_locked_ledger_moves_nothing(env, capsys):
 def test_empty_inbox(env, capsys):
     repo, _ = env
     assert main([], repo_root=repo) == 0
-    assert "받은문서에 PDF 가 없습니다" in capsys.readouterr().out
+    assert "받은문서에 PDF·엑셀 파일이 없습니다" in capsys.readouterr().out
