@@ -19,6 +19,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 from app.excel_extract import read_excel
 from app.extract import extract
+from app.forms import form_fingerprint, form_key
 from app.jobs import Job, _folder_title, list_jobs, save_job
 from app.ledger import ITEMS_SHEET, Ledger, LedgerLocked, is_locked
 from app.local_guard import LocalOnlyError, check_work_dir
@@ -59,6 +60,11 @@ LEDGER_LOCKED_REASON = "누적장부가 엑셀에서 열려 있음. 엑셀을 �
 INTERRUPTED = "처리기록에 성공 기록이 없음. 지난 실행이 중간에 끊겼거나 되돌리기가 끝나지 못했을 수 있음"
 KEEP_HINT = "입력 폴더에서 원본을 치우세요(그대로 두면 날마다 다시 확인필요가 됩니다)."
 REMAKE_HINT = "그러면 내일 실행 때(또는 규칙.yaml 을 고친 뒤) 새로 만듭니다(처리기록은 고칠 필요 없음)."
+STAMP_FORM = "form_fingerprint"  # 승인대기 대조표 속성: 만들 때의 양식 지문
+STAMP_FILE = "file_fingerprint"  # 승인대기 대조표 속성: 만들 때의 복사본 지문
+REMADE_RULES = "규칙이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
+REMADE_MISSING = "대조표가 없어 새로 만들었습니다. 보고 승인하세요"
+REMADE_FILE = "승인대기의 파일이 대조표를 만든 뒤 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요"
 APPROVAL_RETRY_NOTE = ("고친 뒤(규칙.yaml · 고객마스터 등) 다시 승인하면 다시 확인합니다. "
                        f"승인하지 않을 문서면 {WAITING} 폴더의 그 복사본을 지우세요.")
 
@@ -176,16 +182,55 @@ def _current_state(records) -> dict[str, dict]:
 # --- 바깥에서 부르는 것 ---
 
 def run_job(job: Job, work: Path, *, now=None, source_dir: Path | None = None, gate=None,
-            on_success=None) -> RunReport:
+            on_success=None, after=None) -> RunReport:
     """작업 하나를 실행한다. source_dir 기본 = 입력 폴더(승인 실행은 작업 폴더의 승인대기\\ 를 넘긴다).
 
     gate(job, rules, result) 가 True 면 결과를 내지 않고 승인대기로 보낸다.
     on_success(job, result) 는 출력까지 끝난 건마다 부른다.
+    after(job, report) 는 실행이 끝난 뒤 잠금을 쥔 채 부른다(승인대기 정리처럼 다른 실행과 겹치면 안 되는 일).
     """
     now = (now or datetime.now()).replace(microsecond=0)
     source = Path(source_dir) if source_dir is not None else Path(job.input_dir)
     with job_lock(job):
-        return _Run(job, Path(work), now, source, gate, on_success).run()
+        report = _Run(job, Path(work), now, source, gate, on_success).run()
+        if after is not None:
+            try:
+                after(job, report)
+            except Exception as e:  # 정리가 실패해도 이번 실행 결과(보고)는 잃지 않는다
+                report.message += f"\n경고: 실행 뒤 정리를 하지 못함 ({e})"
+        return report
+
+
+def check_file_info(path) -> tuple[str | None, dict]:
+    """대조표의 (맨 위 원본파일 칸 = 승인대기 복사본 이름, 지문 속성). 읽지 못하면 (None, {})."""
+    try:
+        wb = openpyxl.load_workbook(Path(path), read_only=True)
+    except Exception:
+        return None, {}
+    try:
+        stamps = {p.name: str(p.value) for p in wb.custom_doc_props.props}
+        row = next(wb.worksheets[0].iter_rows(min_row=1, max_row=1, values_only=True), ())
+        name = str(row[1]) if len(row) >= 2 and row[0] == "원본파일" and row[1] else None
+        return name, stamps
+    except Exception:
+        return None, {}
+    finally:
+        wb.close()
+
+
+def waiting_checks(job: Job) -> dict[str, list[tuple[Path, dict]]]:
+    """승인대기 대조표들: 복사본 이름(대소문자 무시) → [(대조표 경로, 지문 속성)]."""
+    folder = Path(job.folder) / WAITING / WAITING_CHECKS
+    index: dict[str, list[tuple[Path, dict]]] = {}
+    if not folder.is_dir():
+        return index
+    for check in sorted(folder.glob("*.xlsx")):
+        if check.name.startswith("~$"):
+            continue
+        name, stamps = check_file_info(check)
+        if name is not None:
+            index.setdefault(name.casefold(), []).append((check, stamps))
+    return index
 
 
 def unmatched_old(job: Job, work: Path, now: datetime) -> int:
@@ -214,6 +259,15 @@ def unmatched_old(job: Job, work: Path, now: datetime) -> int:
         except OSError:
             continue
     return count
+
+
+def _documents(folder) -> list[Path]:
+    """폴더의 처리 대상 파일(.pdf · .xlsx, 엑셀 임시 파일 ~$ 제외). 폴더가 없으면 빈 목록."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        return []
+    return sorted(p for p in folder.iterdir()
+                  if p.is_file() and p.suffix.lower() in INPUT_SUFFIXES and not p.name.startswith("~$"))
 
 
 def _same_dir(a, b) -> bool:
@@ -298,6 +352,10 @@ class _Run:
         self.master = None
         # 승인 실행(승인대기\ 를 읽음)이면 승인대기 기록을 건너뛰지 않는다
         self.approving = _same_dir(source, Path(job.folder) / WAITING)
+        self.waiting_fps: set[str] = set()  # 승인대기에 있는 복사본들의 지문
+        self.waiting_unknown = False         # 지문을 읽지 못한 복사본이 있음
+        self.checks_index = None             # 승인대기 대조표(waiting_checks), 처음 쓸 때 읽음
+        self.remade: list[str] = []          # 승인 실행에서 대조표를 새로 만든 문서
 
     # 준비
 
@@ -342,6 +400,8 @@ class _Run:
                 f"이 파일이 열려 있으면 닫고, 엑셀 등으로 고쳐 저장했다면 원래대로 되돌린 뒤 다시 실행하세요: "
                 f"{Path(self.job.folder) / RECORD_FILE}")
         self.success_keys = {(r.get("문서종류"), r.get("번호")) for r in self.state.values() if r.get("상태") == "성공"}
+        if not self.approving:
+            self._scan_waiting()
 
         try:
             candidates = self._candidates()
@@ -370,8 +430,20 @@ class _Run:
         return self.report
 
     def _candidates(self):
-        return sorted(p for p in self.source.iterdir()
-                      if p.is_file() and p.suffix.lower() in INPUT_SUFFIXES and not p.name.startswith("~$"))
+        return _documents(self.source)
+
+    def _scan_waiting(self):
+        """승인대기에 있는 복사본들의 지문. 승인하지 않은 문서(복사본을 지움)인지 가릴 때 쓴다."""
+        try:
+            copies = _documents(Path(self.job.folder) / WAITING)
+        except OSError:
+            self.waiting_unknown = True
+            return
+        for path in copies:
+            try:
+                self.waiting_fps.add(file_fingerprint(path))
+            except OSError:
+                self.waiting_unknown = True  # 모르면 다시 처리하지 않는다(_2 복사본을 만들지 않게)
 
     # 한 건
 
@@ -426,7 +498,9 @@ class _Run:
         if self.approving:
             return False  # 승인은 사람이 누른 실행이므로 승인대기 · 확인필요도 다시 확인한다
         if status == "승인대기":
-            return True
+            # 승인하지 않은 문서(친구가 복사본을 지움)는 규칙을 고친 뒤 다시 처리한다(설계 12-1).
+            # 복사본이 아직 승인대기에 있으면 규칙이 바뀌어도 건너뛴다(승인 때 대조표를 새로 만든다)
+            return (row.get("규칙지문") == self.rules_fp or self.waiting_unknown or fp in self.waiting_fps)
         if status == "확인필요":
             return row.get("날짜") == self.today and row.get("규칙지문") == self.rules_fp
         return False  # 보류: 다음 실행 때 다시
@@ -451,10 +525,60 @@ class _Run:
                 self._review(path, fp, result, (
                     f"고객마스터에 '{customer}' 가 없습니다. 고객마스터.xlsx 에 이 고객 줄을 더한 뒤 다시 넣으세요"))
                 return
+        if self.approving:
+            reason = self._unseen(path, fp, result)
+            if reason:  # 친구가 대조표에서 본 값이 아니므로 내보내지 않는다
+                self._remake_check(path, fp, result, checks, reason)
+                return
         if self.gate is not None and self.gate(self.job, self.rules, result):
             self._to_waiting(path, fp, result, checks)
             return
         self._write(path, fp, result, key, checks, master_row)
+
+    # 승인대기 대조표
+
+    def _checks(self) -> dict[str, list[tuple[Path, dict]]]:
+        if self.checks_index is None:
+            self.checks_index = waiting_checks(self.job)
+        return self.checks_index
+
+    def _stamps(self, fp, result) -> dict:
+        return {STAMP_FORM: form_fingerprint(self.job.rules_path, form_key(result)), STAMP_FILE: fp}
+
+    def _unseen(self, path, fp, result) -> str | None:
+        """이 복사본의 대조표가 지금 값과 같은 규칙 · 같은 파일로 만든 것인지. 아니면 그 사유."""
+        entries = self._checks().get(path.name.casefold(), [])
+        if not entries:
+            return REMADE_MISSING
+        now = self._stamps(fp, result)
+        if any(stamps == now for _, stamps in entries):
+            return None
+        if any(stamps.get(STAMP_FILE) == fp for _, stamps in entries):
+            return REMADE_RULES
+        return REMADE_FILE
+
+    def _write_waiting_check(self, copy: Path, fp, result, checks):
+        """승인대기 대조표를 (다시) 만든다. 같은 복사본 이름을 가리키던 옛 대조표는 지운다."""
+        name = copy.name.casefold()
+        for old, _ in self._checks().get(name, []):
+            try:
+                old.unlink(missing_ok=True)
+            except OSError as e:
+                self.warnings.append(f"경고: 옛 대조표를 지우지 못함 ({old.name}): {e}")
+        stamps = self._stamps(fp, result)
+        # 대조표의 원본파일 칸 = 복사본 이름. 승인이 이 이름으로 대조표와 복사본을 짝짓는다
+        check = write_check_file(copy.parent / WAITING_CHECKS, result, checks, copy.name, stamps)
+        self._checks()[name] = [(check, stamps)]
+
+    def _remake_check(self, path, fp, result, checks, reason):
+        try:
+            self._write_waiting_check(path, fp, result, checks)
+        except Exception as e:
+            self._review(path, fp, result, f"대조표를 새로 만들지 못함: {e}")
+            return
+        self._clear_note(path)
+        self.remade.append(f"{path.name}: {reason}")
+        self._done(path, "승인대기", reason)
 
     def _master(self):
         if self.master is None:
@@ -467,8 +591,7 @@ class _Run:
         copy = free_name(waiting / path.name)
         try:
             shutil.copy2(path, copy)
-            # 대조표의 원본파일 칸 = 복사본 이름. 승인(app.approval)이 이 이름으로 대조표와 복사본을 짝짓는다
-            write_check_file(waiting / WAITING_CHECKS, result, checks, copy.name)
+            self._write_waiting_check(copy, fp, result, checks)
         except Exception as e:
             if copy.exists():
                 copy.unlink()
@@ -525,8 +648,10 @@ class _Run:
                         f"누적장부에는 {key[0]} {key[1]} 이 있는데 {INTERRUPTED}. 결과가 맞으면 {KEEP_HINT} "
                         f"다시 만들려면 누적장부에서 이 문서 줄(문서 시트와 품목 시트)을 지우세요.{also} {REMAKE_HINT}"))
                     return
-                doc_values = {"처리일시": self.now, "원본파일": path.name, "정리된경로": str(path), **result.fields}
-                ledger.add(result, path.name, path, processed_at=self.now)
+                origin_name, origin_path = self._origin(path, fp)
+                doc_values = {"처리일시": self.now, "원본파일": origin_name, "정리된경로": str(origin_path),
+                              **result.fields}
+                ledger.add(result, origin_name, origin_path, processed_at=self.now)
                 added = True
                 ledger.save()
                 saved = True
@@ -555,7 +680,7 @@ class _Run:
             return
 
         try:
-            write_check_file(Path(self.job.folder) / CHECKS, result, checks, path.name)
+            write_check_file(Path(self.job.folder) / CHECKS, result, checks, self._origin(path, fp)[0])
         except Exception as e:  # 결과는 이미 나갔으므로 알리기만 한다
             self.warnings.append(f"경고: 검산 파일을 만들지 못함 ({path.name}): {e}")
         if company is not None:
@@ -571,6 +696,15 @@ class _Run:
                 self.on_success(self.job, result)
             except Exception as e:
                 self.warnings.append(f"경고: 성공 처리 뒤 작업을 하지 못함 ({path.name}): {e}")
+
+    def _origin(self, path, fp) -> tuple[str, Path]:
+        """장부 · 검산 파일에 적을 원본 (이름, 경로). 승인 실행이면 승인대기 복사본이 아니라 입력 폴더의 원본:
+        처리기록의 그 지문 승인대기 줄의 파일 이름(없으면 복사본 이름)과 입력 폴더 경로."""
+        if not self.approving:
+            return path.name, path
+        row = self.state.get(fp) or {}
+        name = row.get("파일") if row.get("상태") == "승인대기" and row.get("파일") else path.name
+        return name, Path(self.job.input_dir) / name
 
     def _write_company(self, final, result, master_row, form):
         """회사 양식을 임시 이름으로 저장 → 다시 읽어 대조 → 같을 때만 최종 이름으로 바꾼다.
@@ -683,6 +817,8 @@ class _Run:
         folder = Path(self.job.folder)
         if counts["확인필요"]:
             lines.append(f"확인필요 폴더의 .txt 를 열어 사유를 보세요: {folder / REVIEW}")
+        for line in self.remade:
+            lines.append(line)
         if counts["승인대기"]:
             lines.append(f"승인대기 폴더의 대조표를 확인한 뒤 승인하세요: {folder / WAITING / WAITING_CHECKS}")
         if counts["보류"]:

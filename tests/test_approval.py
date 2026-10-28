@@ -10,9 +10,10 @@ import pytest
 
 import app.job_run as job_run
 from app.approval import REQUIRED, approval_gate, approve, form_fingerprint, form_key
-from app.job_run import load_records, run_job
+from app.job_run import JobLocked, check_file_info, job_lock, load_records, run_job
 from app.jobs import create_job, load_job, save_job
 from app.master import write_example
+from app.rules import RuleError, load_rules
 from app.verify import Check
 
 REPO = Path(__file__).resolve().parent.parent
@@ -286,8 +287,9 @@ def test_fingerprint_covers_linked_doc_type_and_company_form(env):
     assert all(after_form[k] != after_po[k] for k in keys)
 
 
-def test_rule_change_while_waiting_counts_under_new_rules(env):
-    """승인대기에 있는 사이 그 양식의 규칙이 바뀌면, 승인은 새 규칙으로 다시 검산하고 새 규칙의 첫 승인으로 센다."""
+def test_rule_change_while_waiting_remakes_check_file_before_output(env):
+    """승인대기에 있는 사이 그 양식의 규칙이 바뀌면 친구가 본 값이 아니므로 내보내지 않고 대조표를 새로 만든다.
+    새 대조표를 보고 다시 승인하면 결과가 나가고, 새 규칙의 첫 승인으로 센다."""
     work, inp, out, job = env
     _approved(job, "ACME", 5)
     _drop(ACME_PO, inp)
@@ -296,13 +298,25 @@ def test_rule_change_while_waiting_counts_under_new_rules(env):
 
     report = approve(job, work)
 
-    assert report.counts["성공"] == 1
+    assert report.counts["승인대기"] == 1 and report.counts["성공"] == 0
+    assert "규칙이 바뀌어 대조표를 새로 만들었습니다. 다시 보고 승인하세요" in report.message
+    assert _files(out) == [] and job.approvals["ACME"] == 5
+    waiting = job.folder / "승인대기"
+    assert _files(waiting) == [ACME_PO.name]
+    assert _files(waiting / "대조표") == [CHECK_ACME]
+    _, stamps = check_file_info(waiting / "대조표" / CHECK_ACME)
+    assert stamps["form_fingerprint"] == form_fingerprint(job.rules_path, "ACME")
+
+    again = approve(job, work)
+
+    assert again.counts["성공"] == 1 and COMPANY_ACME in _files(out)
     assert job.approvals["ACME"] == 1
     assert job.fingerprints["ACME"] == form_fingerprint(job.rules_path, "ACME")
 
 
-def test_approval_rechecks_copy_even_if_same_day_review_record_exists(env, monkeypatch):
-    """승인은 사람이 누른 실행이므로 같은 날 · 같은 규칙의 확인필요 기록이 있어도 건너뛰지 않는다."""
+def test_copy_without_check_file_gets_one_before_output(env, monkeypatch):
+    """대조표가 없는 복사본(친구가 직접 넣음)은 대조표부터 만든다. 같은 날 · 같은 규칙의 확인필요 기록이 있어도
+    승인은 사람이 누른 실행이므로 건너뛰지 않는다."""
     work, inp, out, job = env
     _drop(ACME_PO, inp)
     monkeypatch.setattr(job_run, "lookup", lambda master, customer: None)
@@ -312,5 +326,156 @@ def test_approval_rechecks_copy_even_if_same_day_review_record_exists(env, monke
 
     report = approve(job, work)
 
-    assert report.counts["성공"] == 1 and job.approvals["ACME"] == 1
+    assert report.counts["승인대기"] == 1 and report.counts["성공"] == 0
+    assert "대조표가 없어 새로 만들었습니다" in report.message
+    assert _files(out) == []
+    assert _files(job.folder / "승인대기" / "대조표") == [CHECK_ACME]
+
+    again = approve(job, work)
+
+    assert again.counts["성공"] == 1 and job.approvals["ACME"] == 1
     assert _files(job.folder / "승인대기") == []
+
+
+def test_changed_copy_gets_new_check_file_before_output(env):
+    """대조표를 만든 뒤 승인대기의 파일이 바뀌면(검산은 통과해도) 내보내지 않고 대조표를 새로 만든다."""
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    copy = job.folder / "승인대기" / ACME_PO.name
+    wb = openpyxl.load_workbook(copy)
+    wb.active["J1"] = "memo"
+    wb.save(copy)
+    _age(copy)
+
+    report = approve(job, work)
+
+    assert report.counts["승인대기"] == 1 and report.counts["성공"] == 0
+    assert "파일이 대조표를 만든 뒤 바뀌어" in report.message
+    assert approve(job, work).counts["성공"] == 1
+
+
+# --- 수정 1차: 거절 뒤 재처리 · 잠금 안 정리 · 장부 출처 · 판별 순서 · 이름 겹침 · 사유 파일 ---
+
+def test_rejected_document_is_reprocessed_only_after_rules_change(env):
+    """친구가 복사본을 지워 승인하지 않은 문서는 그대로 건너뛰다가, 규칙을 고치면 다시 처리한다(설계 12-1)."""
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    waiting = job.folder / "승인대기"
+    (waiting / ACME_PO.name).unlink()
+
+    tomorrow = run_job(job, work, now=datetime.now() + timedelta(days=1), gate=approval_gate)
+
+    assert tomorrow.counts == dict.fromkeys(tomorrow.counts, 0)
+    assert _files(waiting) == [] and _files(out) == []
+
+    _edit_rules(job, '납품처:     "오른쪽:Deliver To:"', '납품처:     "B7"')
+    after_fix = run_job(job, work, now=datetime.now() + timedelta(days=1), gate=approval_gate)
+
+    assert after_fix.counts["승인대기"] == 1
+    assert _files(waiting) == [ACME_PO.name]
+
+
+def test_rules_change_with_copy_present_makes_no_second_copy(env):
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    _edit_rules(job, '납품처:     "오른쪽:Deliver To:"', '납품처:     "B7"')
+
+    report = run_job(job, work, now=datetime.now() + timedelta(days=1), gate=approval_gate)
+
+    assert report.counts["승인대기"] == 0
+    assert _files(job.folder / "승인대기") == [ACME_PO.name]
+
+
+def test_approval_cleanup_runs_inside_job_lock(env, monkeypatch):
+    import app.approval as approval
+
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    seen = []
+    real = approval._clear_orphan_checks
+
+    def spy(job_, waiting, warnings):
+        with pytest.raises(JobLocked):
+            with job_lock(job_):
+                pass
+        seen.append(True)
+        real(job_, waiting, warnings)
+
+    monkeypatch.setattr(approval, "_clear_orphan_checks", spy)
+
+    assert approve(job, work).counts["성공"] == 1
+    assert approve(job, work).message == "승인할 문서가 없습니다."
+    assert seen == [True, True]
+
+
+def test_ledger_shows_original_file_not_waiting_copy(env):
+    work, inp, out, job = env
+    _drop(ACME_PO, inp, name="PO.xlsx")
+    run_job(job, work, gate=approval_gate)
+    (inp / "PO.xlsx").unlink()
+    _drop(HANIL_PO, inp, name="PO.xlsx")
+    run_job(job, work, gate=approval_gate)
+    assert _files(job.folder / "승인대기") == ["PO.xlsx", "PO_2.xlsx"]
+
+    assert approve(job, work).counts["성공"] == 2
+
+    rows = list(openpyxl.load_workbook(out / f"누적장부_{TITLE}.xlsx")["PO"].iter_rows(values_only=True))
+    header = rows[0]
+    got = [(r[header.index("원본파일")], r[header.index("정리된경로")]) for r in rows[1:] if any(r)]
+    assert got == [("PO.xlsx", str(inp / "PO.xlsx"))] * 2
+    checks = sorted((job.folder / "검산").glob("*.xlsx"))
+    assert len(checks) == 2 and [check_file_info(c)[0] for c in checks] == ["PO.xlsx", "PO.xlsx"]
+
+
+def test_detection_keywords_of_other_forms_change_fingerprint(env):
+    """다른 양식의 판별키워드 · 순서를 고치면 이 양식으로 판별되는 문서가 바뀔 수 있으므로 지문이 바뀐다."""
+    work, inp, out, job = env
+    keys = ("ACME", "HANIL", "Invoice", "DM")
+    before = {k: form_fingerprint(job.rules_path, k) for k in keys}
+
+    _edit_rules(job, '판별키워드: ["Buyer:"]', '판별키워드: ["Buyer:", "PO Number:"]')  # ACME
+    after_excel = {k: form_fingerprint(job.rules_path, k) for k in keys}
+    assert [k for k in keys if after_excel[k] != before[k]] == ["ACME", "HANIL"]
+
+    _edit_rules(job, '판별키워드: ["Invoice No"]', '판별키워드: ["Invoice No", "INVOICE"]')
+    after_pdf = {k: form_fingerprint(job.rules_path, k) for k in keys}
+    assert [k for k in keys if after_pdf[k] != after_excel[k]] == ["Invoice", "DM"]
+
+
+def test_excel_form_named_like_doc_type_is_rejected(env):
+    work, inp, out, job = env
+    _edit_rules(job, "  HANIL:\n", "  PO:\n")
+
+    with pytest.raises(RuleError, match="문서종류 이름과 같습니다"):
+        load_rules(job.rules_path)
+
+
+def test_rejected_copy_note_is_removed_with_its_check_file(env, monkeypatch):
+    """승인 실행에서 확인필요가 된 복사본을 친구가 지우면, 다음 승인 때 대조표와 그 사유 파일을 치운다.
+    같은 이름이어도 입력 폴더 파일의 사유 파일은 둔다."""
+    from app.excel_extract import read_excel
+    from app.outputs import write_check_file
+
+    work, inp, out, job = env
+    _drop(ACME_PO, inp)
+    run_job(job, work, gate=approval_gate)
+    monkeypatch.setattr(job_run, "lookup", lambda master, customer: None)
+    assert approve(job, work).counts["확인필요"] == 1
+    monkeypatch.undo()
+    waiting = job.folder / "승인대기"
+    note = job.folder / "확인필요" / f"{ACME_PO.name}.txt"
+    assert note.is_file()
+    (waiting / ACME_PO.name).unlink()
+
+    assert approve(job, work).message == "승인할 문서가 없습니다."
+    assert _files(waiting / "대조표") == [] and not note.exists()
+
+    # 같은 이름의 입력 폴더 파일이 남긴 사유 파일은 그대로 둔다
+    note.write_text(f"원본: {inp / ACME_PO.name}\n사유: 시험\n", encoding="utf-8")
+    write_check_file(waiting / "대조표", read_excel(ACME_PO, load_rules(job.rules_path)), [], ACME_PO.name)
+    approve(job, work)
+    assert _files(waiting / "대조표") == [] and note.is_file()

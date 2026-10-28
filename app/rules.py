@@ -118,6 +118,11 @@ def load_rules(path) -> Rules:
     excel = data.get("엑셀양식") or {}
     if not isinstance(excel, dict):
         raise RuleError("엑셀양식 아래에는 고객별 이름: 내용 을 적어야 합니다.")
+    for name in excel:
+        if str(name) in by_name:
+            raise RuleError(
+                f"엑셀양식 이름 '{name}' 이 문서종류 이름과 같습니다. 승인 수를 양식 이름으로 세므로 "
+                f"엑셀양식 이름을 다르게 지으세요(예: 고객 이름).")
     return Rules(
         doc_types,
         _sheet_order(data.get("시트순서"), [d.name for d in doc_types]),

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.packaging.custom import StringProperty
 from openpyxl.styles import Font
 
 from app.excel_extract import excel_number
@@ -117,9 +118,14 @@ def _mark(ok) -> str:
     return "해당 없음" if ok is None else "일치" if ok else "불일치"
 
 
-def write_check_file(folder, result, checks, source_name) -> Path:
-    """검산 기록: 검산_{번호}.xlsx. 맨 위 줄에 원본파일, 그 아래 항목별 대조 결과. 회사 양식 파일에는 쓰지 않는다."""
+def write_check_file(folder, result, checks, source_name, stamps: dict | None = None) -> Path:
+    """검산 기록: 검산_{번호}.xlsx. 맨 위 줄에 원본파일, 그 아래 항목별 대조 결과. 회사 양식 파일에는 쓰지 않는다.
+
+    stamps 는 화면에 보이지 않는 문서 속성(사용자 지정 속성)으로 남긴다(승인대기 대조표의 지문 등).
+    """
     wb = openpyxl.Workbook()
+    for name, value in (stamps or {}).items():
+        wb.custom_doc_props.append(StringProperty(name=name, value=str(value)))
     ws = wb.active
     ws.title = "검산"
     ws.append(["원본파일", ILLEGAL_CHARACTERS_RE.sub("", source_name)])
