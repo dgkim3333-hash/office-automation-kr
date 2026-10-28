@@ -394,3 +394,46 @@ def test_docs_mention_original_goes_to_claude():    # 01장 · 04장에 "원본"
 - [ ] **Step 2~4:** 실패 확인 → 작성 → `uv run pytest -q`
 - [ ] **Step 5: 커밋** — `W8 작업지시서와 문서`
 - [ ] **Step 6: push 전 확인** — 대표에게 `git push origin main` 여부를 묻고, 승인 뒤에만 push.
+
+---
+
+### Task W9: 파트별 마크업 (W8 보다 먼저 한다 — 설계 13절)
+
+**Files:**
+- Create: `app/markup.py`, `tests/test_markup.py`
+- Modify: `app/rules.py`(회사양식 열 값 `마크업.단가` · `마크업.금액` · `마크업.율`, 선택 `회사양식.마크업: {품번열, 단가열, 수량열}` 기본 품번 · 단가 · 수량), `app/outputs.py`(company_rows 가 마크업 값 계산), `app/job_run.py`(마크업표 읽기 · 빠진 파트 확인필요 · 재시도 지문에 마크업표 포함 · 검산), `app/verify.py` 또는 `app/markup.py`(마크업 검산 Check), `app/init.py`(예시 `마크업표.xlsx` 없을 때만), `app/__main__.py`(`check --작업` 에 마크업 표시)
+- Test: `tests/test_markup.py`, 관련 기존 테스트
+
+**Interfaces:**
+- Produces:
+  - `MARKUP_FILE = "마크업표.xlsx"` (작업 폴더, 고객마스터 옆)
+  - `@dataclass MarkupRow: part: str; rate: Decimal; places: int | None` (rate 는 % 숫자, 3 = 3%)
+  - `class MarkupError(Exception)`
+  - `load_markup(path) -> dict[str, MarkupRow]` — 첫 줄 머리글에 `파트넘버` · `마크업%` 필수, `반올림자리` 선택. 파트넘버는 앞뒤 공백 제거 후 그대로(대소문자 구분 없이 비교). 같은 파트 두 번 · 숫자 아닌 % · 0 미만 또는 10 초과 → MarkupError(한국어, 몇째 줄인지). 엑셀 백분율 서식 칸(0.03, 서식에 %)은 3 으로 읽는다. float 은 `excel_number` 로 정규화.
+  - `apply_markup(price: Decimal, row: MarkupRow) -> Decimal` — price × (1 + rate/100), places 있으면 ROUND_HALF_UP 으로 그 자리, 없으면 그대로(Decimal 정확값)
+  - `missing_parts(result, form, table) -> list[str]`, `markup_checks(result, rows_written, table) -> list[Check]`
+  - `write_example_markup(path)` — 가짜 샘플 품번(ACME · Hanil 샘플의 품번) 몇 줄, 0 · 2 · 3%
+- 회사 양식 행 계산: `마크업.율` = 그 품목의 rate, `마크업.단가` = apply_markup(품목 단가), `마크업.금액` = 수량 × 마크업.단가(반올림 없음; places 있으면 단가만 반올림)
+
+- [ ] **Step 1: 실패하는 테스트**
+
+```python
+def test_apply_markup_examples():
+    assert apply_markup(Decimal("0.10"), MarkupRow("A", Decimal("3"), None)) == Decimal("0.103")
+    assert apply_markup(Decimal("0.37"), MarkupRow("B", Decimal("3"), None)) == Decimal("0.3811")
+    assert apply_markup(Decimal("0.37"), MarkupRow("B", Decimal("3"), 3)) == Decimal("0.381")
+    assert apply_markup(Decimal("5.00"), MarkupRow("C", Decimal("0"), None)) == Decimal("5.00")
+def test_load_markup_reads_percent_formatted_cells(tmp_path)      # 0.03 + 서식 0% → rate 3
+def test_load_markup_rejects_duplicates_bad_values_out_of_range(tmp_path)
+def test_company_form_uses_markup_columns(tmp_path)                # 회사양식 열 Unit Price 마크업.단가 → 0.103
+def test_missing_part_goes_to_review_listing_parts(tmp_path)       # 사유에 빠진 파트넘버, 출력 없음
+def test_adding_missing_part_retries_same_day(tmp_path)            # 마크업표에 줄 더함 → 같은 날 다시 실행에서 성공
+def test_markup_check_rows_in_check_file(tmp_path)                 # 검산 파일에 줄마다 마크업% · 본사 단가 · 일치
+def test_markup_change_does_not_reset_approvals(tmp_path)
+def test_no_markup_columns_means_no_markup_file_needed(tmp_path)   # 마크업.* 를 안 쓰는 규칙은 마크업표 없어도 정상
+```
+
+- [ ] **Step 2: 실행해 실패 확인** — `uv run pytest tests/test_markup.py -q`
+- [ ] **Step 3: 구현** — 기존 고객마스터 처리 방식(작업 공용 파일, Claude 가 열지 않음, 없으면 확인필요)을 따른다. 예시 규칙(`rules/규칙.예시.yaml`)의 회사양식에는 기존 열을 바꾸지 말고 `HQ Unit Price: 마크업.단가` · `HQ Amount: 마크업.금액` · `Markup %: 마크업.율` 열을 더하되, samples 의 기대 결과 파일과 맞지 않게 되면 samples/make_samples.py 로 함께 다시 만든다(가짜 데이터만).
+- [ ] **Step 4: 통과 확인** — PowerShell 에서 `uv run pytest -q` 전체 녹색
+- [ ] **Step 5: 커밋** — `W9 파트별 마크업`
