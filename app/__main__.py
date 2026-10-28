@@ -7,14 +7,117 @@
 """
 import argparse
 import sys
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
 from app import config
-from app.extract import extract
+from app.extract import ExtractResult, extract
 from app.init import InitError, init
-from app.organize import render_filename
+from app.ledger import Ledger, LedgerLocked
+from app.log import append_log, summary
+from app.organize import free_name, move_duplicate, move_review, move_success, render_filename, target_path
 from app.rules import RuleError, load_rules
+
+LOCKED_MESSAGE = (
+    "누적장부.xlsx 가 엑셀에서 열려 있습니다. 엑셀을 닫고 다시 실행하세요.\n"
+    "(파일은 하나도 옮기지 않았습니다. 받은문서에 그대로 있습니다.)"
+)
+
+
+def _now():
+    return datetime.now().replace(microsecond=0)
+
+
+@dataclass
+class _Item:
+    """받은문서 PDF 한 건의 처리 계획."""
+    src: Path
+    result: ExtractResult
+    outcome: str = ""      # 성공 · 중복 · 확인필요
+    reason: str = ""
+    dst: Path | None = None  # 성공일 때 옮길 곳
+
+
+def run(work: Path, rules, overwrite=False) -> int:
+    """받은문서 처리. 순서: 전부 추출 → 장부 저장 1회 → 저장이 된 뒤에만 파일 이동."""
+    inbox = work / config.INBOX
+    pdfs = sorted(p for p in inbox.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+    if not pdfs:
+        print(f"받은문서에 PDF 가 없습니다: {inbox}")
+        print(summary([]))
+        return 0
+
+    items = []
+    for pdf in pdfs:
+        try:
+            result = extract(pdf, rules)
+        except Exception as e:  # 깨진 PDF 한 건이 나머지를 막지 않게
+            result = ExtractResult(doc_type=None, has_text=False)
+            items.append(_Item(pdf, result, "확인필요", f"PDF 를 읽지 못함 — {e}"))
+            continue
+        items.append(_Item(pdf, result))
+
+    when = _now()
+    try:
+        ledger = Ledger.open(work / config.LEDGER_FILE, rules)
+        _plan(items, ledger, work, overwrite, when)
+        for item in items:
+            ledger.add_log(when, item.src.name, item.outcome, item.reason)
+        ledger.save()
+    except LedgerLocked:
+        for item in items:
+            append_log(work / config.LOG_FILE, when, item.src.name, "보류", "장부가 엑셀에서 열려 있음")
+        print(LOCKED_MESSAGE)
+        return 2
+
+    for item in items:
+        _move(item, work)
+        append_log(work / config.LOG_FILE, when, item.src.name, item.outcome, item.reason)
+
+    print()
+    print(summary(i.outcome for i in items))
+    if any(i.outcome == "확인필요" for i in items):
+        print(f"확인필요 폴더의 .txt 를 열어 사유를 보세요: {work / config.REVIEW}")
+    return 0
+
+
+def _plan(items, ledger, work, overwrite, when):
+    """각 건을 성공·중복·확인필요로 나누고 장부에 기록한다(아직 저장·이동은 안 함)."""
+    seen, reserved = set(), set()
+    for item in items:
+        if item.outcome:  # 이미 읽기 실패로 정해짐
+            continue
+        result = item.result
+        if result.review_reason:
+            item.outcome, item.reason = "확인필요", result.review_reason
+            continue
+        key = (result.doc_type.name, str(result.number))
+        if key in seen or (ledger.is_duplicate(*key) and not overwrite):
+            item.outcome, item.reason = "중복", f"{key[0]} {key[1]} 이미 장부에 있음"
+            continue
+        if ledger.is_duplicate(*key):
+            ledger.remove(*key)
+            notes = ["덮어쓰기"]
+        else:
+            notes = []
+        seen.add(key)
+        item.dst = free_name(target_path(result, work), reserved)
+        reserved.add(item.dst)
+        ledger.add(result, item.src.name, item.dst.relative_to(work), processed_at=when)
+        item.outcome, item.reason = "성공", "; ".join(notes + result.warnings)
+
+
+def _move(item, work):
+    if item.outcome == "성공":
+        final = move_success(item.src, item.dst)
+        print(f"성공      {item.src.name} → {final.relative_to(work)}")
+    elif item.outcome == "중복":
+        move_duplicate(item.src, work)
+        print(f"중복      {item.src.name} → {config.INBOX}\\{config.DUPLICATES}\\")
+    else:
+        move_review(item.src, work, item.reason, item.result.text_head)
+        print(f"확인필요  {item.src.name} — {item.reason}")
 
 
 def _parser():
@@ -38,8 +141,7 @@ def main(argv=None, repo_root=config.REPO_ROOT) -> int:
                 print("검사할 PDF 경로를 적어 주세요. 예: uv run python -m app check 받은문서\\샘플.pdf")
                 return 1
             return check(Path(args.target), rules)
-        print("받은문서 처리는 아직 준비 중입니다.")
-        return 1
+        return run(work, rules, overwrite=args.overwrite)
     except (config.ConfigError, InitError) as e:
         print(e)
         return 1

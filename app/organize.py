@@ -33,18 +33,20 @@ def target_path(result, work_dir) -> Path:
     return Path(work_dir) / config.ORGANIZED / render_filename(result)
 
 
-def _free_name(path: Path) -> Path:
-    """같은 이름이 있으면 _2, _3 … 을 붙인다."""
-    if not path.exists():
+def free_name(path: Path, reserved=()) -> Path:
+    """같은 이름이 있거나(reserved 포함) 쓰기로 한 이름이면 _2, _3 … 을 붙인다."""
+    path = Path(path)
+    taken = lambda p: p.exists() or p in reserved  # noqa: E731
+    if not taken(path):
         return path
     n = 2
-    while (candidate := path.with_name(f"{path.stem}_{n}{path.suffix}")).exists():
+    while taken(candidate := path.with_name(f"{path.stem}_{n}{path.suffix}")):
         n += 1
     return candidate
 
 
 def _move(src, dst) -> Path:
-    dst = _free_name(Path(dst))
+    dst = free_name(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
     return dst
