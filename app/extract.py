@@ -20,6 +20,7 @@ class ExtractResult:
     missing_required: bool = False
     warnings: list[str] = field(default_factory=list)
     has_text: bool = True
+    source_form: str | None = None  # 엑셀 PO 면 엑셀양식 이름(고객), PDF 면 None
 
     @property
     def review_reason(self) -> str | None:
