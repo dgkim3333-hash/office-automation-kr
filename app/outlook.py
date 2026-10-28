@@ -27,7 +27,7 @@ def collect(mails, inbox_dir) -> list[Path]:
     inbox_dir = Path(inbox_dir)
     inbox_dir.mkdir(parents=True, exist_ok=True)
     saved = []
-    for mail in list(mails):
+    for mail in [_item(mails, i) for i in range(_count(mails))]:  # 범주를 바꾸기 전에 목록을 고정
         categories = _categories(mail)
         if DONE_CATEGORY in categories:
             continue
@@ -51,11 +51,21 @@ def _item(collection, i):
     return collection.Item(i + 1) if hasattr(collection, "Item") else collection[i]  # COM 은 1부터
 
 
+def find_subfolder(folders, name):
+    """이름이 같은 하위 폴더. 없으면 LookupError."""
+    for i in range(_count(folders)):
+        folder = _item(folders, i)
+        if folder.Name == name:
+            return folder
+    raise LookupError(name)
+
+
 def _connect():
     import win32com.client
 
     namespace = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
-    return namespace.GetDefaultFolder(OL_FOLDER_INBOX).Folders[FOLDER_NAME].Items
+    inbox = namespace.GetDefaultFolder(OL_FOLDER_INBOX)
+    return find_subfolder(inbox.Folders, FOLDER_NAME).Items
 
 
 def collect_from_outlook(inbox_dir, connect=_connect) -> list[Path]:

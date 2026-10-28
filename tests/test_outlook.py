@@ -47,6 +47,32 @@ def test_marks_mail_done_and_skips_done(tmp_path):
     assert not (tmp_path / "old.pdf").exists()
 
 
+class FakeFolders:
+    """COM 컬렉션처럼 Count 와 1부터 세는 Item 만 있다."""
+
+    def __init__(self, names):
+        self.items = [type("Folder", (), {"Name": n})() for n in names]
+        self.Count = len(self.items)
+
+    def Item(self, i):
+        return self.items[i - 1]
+
+
+def test_find_subfolder_by_name():
+    from app.outlook import find_subfolder
+
+    assert find_subfolder(FakeFolders(["고객", "자동화"]), "자동화").Name == "자동화"
+
+
+def test_find_subfolder_missing_raises():
+    import pytest
+
+    from app.outlook import find_subfolder
+
+    with pytest.raises(LookupError):
+        find_subfolder(FakeFolders(["고객"]), "자동화")
+
+
 def test_without_outlook_prints_korean_message(tmp_path, capsys):
     def no_outlook():
         raise OSError("COM 없음")
