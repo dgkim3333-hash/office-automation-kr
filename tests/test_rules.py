@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.rules import RuleError, load_rules
+from app.rules import CheckSpec, RuleError, load_rules
 
 REPO = Path(__file__).resolve().parent.parent
 EXAMPLE = REPO / "rules" / "규칙.예시.yaml"
@@ -91,6 +91,42 @@ def test_unknown_format_raises(tmp_path):
     path = _broken(tmp_path, lambda d: d["필드"]["합계금액"].update(형식="원화"))
     with pytest.raises(RuleError, match="원화"):
         load_rules(path)
+
+
+def test_example_check_specs():
+    rules = load_rules(EXAMPLE)
+    assert rules.get("Invoice").check == CheckSpec(subtotal="소계", extras=["운임"], total="합계금액")
+    assert rules.get("DM").check == CheckSpec(subtotal=None, extras=[], total="합계금액")
+    assert rules.get("PO").check is None
+
+
+def test_check_spec_unknown_field_is_rule_error(tmp_path):
+    path = _broken(tmp_path, lambda d: d["필드"].pop("운임"))
+    with pytest.raises(RuleError, match="검산의 '운임' 은 필드 목록에 없습니다"):
+        load_rules(path)
+
+
+def test_check_spec_field_must_be_amount(tmp_path):
+    path = _broken(tmp_path, lambda d: d["필드"]["소계"].pop("형식"))
+    with pytest.raises(RuleError, match="소계"):
+        load_rules(path)
+
+
+def test_check_spec_unknown_key_is_rule_error(tmp_path):
+    path = _broken(tmp_path, lambda d: d["검산"].update(세금="운임"))
+    with pytest.raises(RuleError, match="세금"):
+        load_rules(path)
+
+
+def test_check_spec_extras_need_total(tmp_path):
+    path = _broken(tmp_path, lambda d: d["검산"].pop("합계"))
+    with pytest.raises(RuleError, match="부대비용"):
+        load_rules(path)
+
+
+def test_check_spec_single_extra_may_be_text(tmp_path):
+    path = _broken(tmp_path, lambda d: d["검산"].update(부대비용="운임"))
+    assert load_rules(path).get("Invoice").check.extras == ["운임"]
 
 
 def test_sheet_order_from_rules():

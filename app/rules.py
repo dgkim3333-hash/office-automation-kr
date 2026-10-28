@@ -31,6 +31,14 @@ class Table:
 
 
 @dataclass
+class CheckSpec:
+    """합계 검산에 쓸 필드 이름. 모두 그 문서종류의 '형식: 금액' 필드."""
+    subtotal: str | None
+    extras: list[str]
+    total: str | None
+
+
+@dataclass
 class DocType:
     name: str
     keywords: list[str]
@@ -38,6 +46,7 @@ class DocType:
     fields: dict[str, Field]
     table: Table | None
     filename_tpl: str
+    check: CheckSpec | None = None
 
 
 @dataclass
@@ -237,6 +246,38 @@ def _doc_type(name, body) -> DocType:
         fields=fields,
         table=_table(where, body.get("표")),
         filename_tpl=filename_tpl,
+        check=_check_spec(where, body.get("검산"), fields),
+    )
+
+
+CHECK_KEYS = ("소계", "부대비용", "합계")
+
+
+def _check_spec(where, spec, fields) -> CheckSpec | None:
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise RuleError(f"{where} 검산은 {{소계: 필드, 부대비용: [필드], 합계: 필드}} 처럼 적어야 합니다.")
+    for key in spec:
+        if key not in CHECK_KEYS:
+            raise RuleError(f"{where} 검산의 '{key}' 는 쓸 수 없습니다. 소계 · 부대비용 · 합계만 됩니다.")
+    extras = spec.get("부대비용") or []
+    if not isinstance(extras, list):
+        extras = [extras]
+    subtotal = spec.get("소계")
+    total = spec.get("합계")
+    names = [str(n) for n in extras] + [str(n) for n in (subtotal, total) if n is not None]
+    for n in names:
+        if n not in fields:
+            raise RuleError(f"{where} 검산의 '{n}' 은 필드 목록에 없습니다.")
+        if fields[n].fmt != "금액":
+            raise RuleError(f"{where} 검산의 '{n}' 은 '형식: 금액' 필드여야 합니다.")
+    if extras and total is None:
+        raise RuleError(f"{where} 검산의 부대비용은 합계와 함께 적어야 합니다.")
+    return CheckSpec(
+        subtotal=None if subtotal is None else str(subtotal),
+        extras=[str(n) for n in extras],
+        total=None if total is None else str(total),
     )
 
 
