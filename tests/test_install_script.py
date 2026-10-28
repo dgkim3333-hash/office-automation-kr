@@ -302,5 +302,5 @@ def test_installed_files_get_install_time_not_zip_time(tmp_path, repo_zip):
                          "-WorkDir", str(tmp_path / "사무자동화"), "-ClaudeHome", str(tmp_path / "ch"))
     assert proc.returncode == 0, proc.stdout.decode("utf-8", "replace")
     repo = install_dir / "office-automation-kr-main"
-    for name in ("체험.bat", "README.md", "app/__main__.py", "samples/03_Invoice_DM_PDF/INV-2026-10231.pdf"):
+    for name in ("run.bat", "README.md", "app/__main__.py", "samples/03_Invoice_DM_PDF/INV-2026-10231.pdf"):
         assert (repo / name).stat().st_mtime >= started, name
