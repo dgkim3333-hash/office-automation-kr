@@ -651,11 +651,12 @@ def _check_company_form(result, rules, work):
         try:
             row = lookup(load_master(Path(work) / config.MASTER_FILE), customer) if work else None
         except MasterError as e:
-            print(f"고객마스터: {e}")
-        if row is not None:
-            print("고객마스터: 찾음")  # 고객코드 등 값은 회사 정보라 보여 주지 않는다(Claude 도 보는 화면, Ruling 25)
+            print(f"고객마스터: {e}")  # 「없음」 안내는 덧붙이지 않는다(원인 · 같은 고객 두 줄이 가려짐)
         else:
-            print(f"고객마스터: 없음 ('{customer}' 줄을 고객마스터.xlsx 에 더해야 회사 양식이 만들어집니다)")
+            if row is not None:
+                print("고객마스터: 찾음")  # 고객코드 등 값은 회사 정보라 보여 주지 않는다(Claude 도 보는 화면, Ruling 25)
+            else:
+                print(f"고객마스터: 없음 ('{customer}' 줄을 고객마스터.xlsx 에 더해야 회사 양식이 만들어집니다)")
     if form.uses_markup:
         _check_markup(result, form, row, work)
     print(f"회사 양식: {company_form_name(result, form)} ({len(result.table or [])}줄)")

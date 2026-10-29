@@ -27,7 +27,7 @@ from app.log import append_log
 from app.markup import (
     MARKUP_FILE, MarkupError, markup_checks, markup_from_bytes, markup_stamp, missing_reason, written_markup,
 )
-from app.master import MasterError, lookup, master_from_bytes, master_stamp
+from app.master import DuplicateCustomer, MasterError, lookup, master_from_bytes, master_stamp
 from app.organize import free_name
 from app.outputs import (
     _same_value, _text, company_form_name, company_rows, company_workbook, read_back, write_check_file,
@@ -93,6 +93,7 @@ class RunReport:
     output_files: list[Path] = field(default_factory=list)
     ledger_locked: bool = False  # 누적장부가 엑셀에서 열려 있어 보류한 파일이 있음
     stopped: bool = False        # 처리기록을 쓰지 못해 중간에 멈춤(message 맨 앞에 「중요:」)
+    alerts: list[str] = field(default_factory=list)  # 알림에도 그대로 보일 경고(고객마스터의 같은 고객 두 줄 등)
 
     @property
     def has_news(self) -> bool:
@@ -656,6 +657,8 @@ class _Run:
             try:
                 master_row = lookup(self._master(), customer)
             except MasterError as e:
+                if isinstance(e, DuplicateCustomer) and str(e) not in self.report.alerts:
+                    self.report.alerts.append(str(e))  # 알림에도 보이게(고친 사람이 바로 알게)
                 self._review(path, fp, result, str(e))
                 return
             if master_row is None:
@@ -1015,6 +1018,7 @@ class _Run:
         if self.stop_reason:
             lines.append(f"중요: {self.stop_reason}")
         lines.append(f"{self.job.title}: " + " · ".join(parts))
+        lines.extend(f"경고: {a}" for a in self.report.alerts)
         if self.ledger_locked:
             lines.append(f"누적장부가 엑셀에서 열려 있어 파일 {self.ledger_held}개를 처리하지 못했습니다(보류). "
                          f"엑셀을 닫으면 다음 실행 때 처리합니다: {ledger_path(self.job)}")

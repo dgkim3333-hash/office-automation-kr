@@ -41,7 +41,9 @@ def report_text(job, report) -> str:
         parts.append(f"어느 작업에도 맞지 않는 파일 {others}개")
     if xls > 0:
         parts.append(XLS_HINT.format(n=xls))
-    return f"{job.title}: " + ", ".join(parts)
+    text = f"{job.title}: " + ", ".join(parts)
+    alerts = getattr(report, "alerts", [])
+    return "\n".join([text] + [f"경고: {a}" for a in alerts])
 
 
 def toast_script(title: str, body: str, folder: Path | None) -> str:

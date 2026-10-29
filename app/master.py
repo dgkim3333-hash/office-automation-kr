@@ -20,6 +20,18 @@ class MasterError(Exception):
     """고객마스터.xlsx 를 읽을 수 없을 때."""
 
 
+class DuplicateCustomer(MasterError):
+    """같은 고객 줄이 두 개 이상이라 어느 줄이 맞는지 모를 때. 그 고객 문서만 확인필요로 간다."""
+
+
+class Master(dict):
+    """고객명 열쇠(_key) → 줄. duplicates = 두 줄 이상인 고객의 열쇠 → 엑셀 줄 번호들(머리글이 1번째 줄)."""
+
+    def __init__(self):
+        super().__init__()
+        self.duplicates: dict[str, list[int]] = {}
+
+
 def _key(name) -> str:
     return " ".join(str(name or "").split()).lower()
 
@@ -47,17 +59,30 @@ def _master_from(source) -> dict[str, dict]:
     header = [str(h).strip() if h is not None else "" for h in (rows[0] if rows else [])]
     if NAME_COLUMN not in header:
         raise MasterError(f"고객마스터.xlsx 첫 줄에 '{NAME_COLUMN}' 열이 있어야 합니다.")
-    master = {}
-    for values in rows[1:]:
+    master = Master()
+    lines: dict[str, list[int]] = {}
+    for line, values in enumerate(rows[1:], 2):
         row = {h: v for h, v in zip(header, values) if h}
-        if _key(row.get(NAME_COLUMN)):
-            master[_key(row[NAME_COLUMN])] = row
+        key = _key(row.get(NAME_COLUMN))
+        if key:
+            master.setdefault(key, row)
+            lines.setdefault(key, []).append(line)
+    master.duplicates = {k: v for k, v in lines.items() if len(v) > 1}
     return master
 
 
 def lookup(master, customer_name):
-    """고객명으로 찾는다(대소문자·띄어쓰기 차이는 무시). 없으면 None."""
-    return master.get(_key(customer_name))
+    """고객명으로 찾는다(대소문자·띄어쓰기 차이는 무시). 없으면 None.
+    같은 고객 줄이 두 개 이상이면 DuplicateCustomer(어느 줄의 고객코드 · 결제조건이 맞는지 모르므로)."""
+    key = _key(customer_name)
+    lines = getattr(master, "duplicates", {}).get(key)
+    if lines:
+        name = master[key].get(NAME_COLUMN)
+        raise DuplicateCustomer(
+            f"고객마스터에 '{name}' 줄이 {len(lines)}개 있습니다({' · '.join(map(str, lines))}번째 줄). "
+            "어느 줄이 맞는지 알 수 없어 회사 양식을 만들지 않았습니다. "
+            "고객마스터.xlsx 에서 한 줄만 남기고 저장한 뒤 지금 실행을 누르세요")
+    return master.get(key)
 
 
 def master_stamp(row) -> str:
