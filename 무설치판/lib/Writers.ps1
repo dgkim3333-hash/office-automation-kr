@@ -22,6 +22,7 @@ $script:CheckFieldsSheet = '추출값'
 $script:CheckItemsSheet = '품목'
 $script:CheckCompanySheet = '회사양식'
 $script:ExcelWriteFailText = '{0}로 쓰지 못함: {1}'
+$script:LedgerOpened = $null   # 마지막 장부 쓰기에서 엑셀이 연 파일(시험용 확인, 새 장부면 $null)
 $script:ReadBackShown = 5     # 다시 읽기 오류 글자에 보여 줄 문제 수(지금 판 job_run 과 같음)
 
 # ---- 값 → 엑셀 칸 (부모 runspace) ---------------------------------------------------------------
@@ -389,7 +390,7 @@ $script:WriterBody = {
         $books = Hold $Excel.Workbooks
         $layout = $Step.layout
         if ($Step.exists) {
-            $book = Hold $books.Open($Step.path, 0, $true)     # 읽기 전용: 원래 파일은 엑셀이 쓰지 않는다(고친 판은 tmp 로)
+            $book = Hold $books.Open($Step.path, 0, $true)     # 장부의 임시 복사본을 읽기 전용으로(고친 판은 tmp 로)
         } else {
             $book = Hold $books.Add(-4167)
             $first = Hold (Hold $book.Worksheets).Item(1)
@@ -397,7 +398,9 @@ $script:WriterBody = {
             $second = Hold (Hold $book.Worksheets).Add($missing, $first)
             $second.Name = $layout.log
         }
-        $result = [pscustomobject]@{ duplicate = $false; doc = $null; items = $null }
+        $opened = $null
+        if ($Step.exists) { $opened = [string]$book.FullName }
+        $result = [pscustomobject]@{ duplicate = $false; doc = $null; items = $null; opened = $opened }
         try {
             # 열 맞추기(지금 판 _sync_columns): 품목 · 처리로그가 없으면 끝에, 문서종류 시트가 없으면 품목 앞에
             foreach ($name in @($layout.items, $layout.log)) {
@@ -589,8 +592,9 @@ function Save-NewBook([string]$Final, $Sheets, [string]$ReadSheet, $Header, $Row
             $problems = Compare-ReadBack $raw.rows $read $Header $Rows
             if ($problems.Count -gt 0) { throw (New-ReadBackError $problems) }
         }
-        if (Test-Path -LiteralPath $Final) { throw ('저장하는 사이 출력 폴더에 {0} 이 생겼습니다' -f [IO.Path]::GetFileName($Final)) }
-        [IO.File]::Move($tmp, $Final)
+        $appeared = '저장하는 사이 출력 폴더에 {0} 이 생겼습니다' -f [IO.Path]::GetFileName($Final)
+        if (Test-Path -LiteralPath $Final) { throw $appeared }
+        try { [IO.File]::Move($tmp, $Final) } catch { if (Test-Path -LiteralPath $Final) { throw $appeared }; throw }   # 옮기기는 있는 파일을 덮지 않는다
     } finally {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }
@@ -605,10 +609,22 @@ function Get-RowList($Rows) {
     return ,$list
 }
 
-function Write-CompanyForm([string]$Folder, $Result, $Company, $Form) {
+function Write-CompanyForm([string]$Folder, $Result, $Company, $Form, [switch]$Exact) {
     # 회사 양식 파일(지금 판 write_company_form): 시트 = 양식 시트, 머리글 굵게 · 틀 고정 A2, 이름은 양식 파일명(같은 이름이 있으면 _2 …).
+    # -Exact: 같은 이름이 이미 있으면 _2 로 쓰지 않고 멈춘다(지금 판 job_run: 확인필요). 오류 .Data['exists'] = $true.
+    #   마지막 옮기기(File.Move)는 있는 파일을 덮지 않으므로, 확인한 뒤 그 사이에 생겨도 쓰지 않는다.
     # $Company = Get-CompanyRows 결과 {header, rows}. 저장 뒤 다시 읽어 다르면 파일을 남기지 않고 오류(.Data['problems']).
-    $final = Get-FreeName (Join-Path $Folder (Get-CompanyFormName $Result $Form)) $null
+    $wanted = (Join-Path $Folder (Get-CompanyFormName $Result $Form)).Replace('/', '\')
+    if ($Exact) {
+        if (Test-Path -LiteralPath $wanted) {
+            $failure = New-Object System.IO.IOException ('출력 폴더에 {0} 이 이미 있습니다' -f [IO.Path]::GetFileName($wanted))
+            $failure.Data['exists'] = $true
+            throw $failure
+        }
+        $final = $wanted
+    } else {
+        $final = Get-FreeName $wanted $null
+    }
     $header = ConvertTo-ItemArray $Company.header
     $rows = Get-RowList $Company.rows
     $all = New-Object System.Collections.Generic.List[object]
@@ -876,12 +892,15 @@ function Get-LedgerLayout($Rules) {
               item_columns = $itemColumns.ToArray(); log_columns = $script:LedgerLogColumns; order = [string[]]$order; first = [string]$order[0] }
 }
 
-function ConvertTo-LedgerCells($Values) {
+function ConvertTo-LedgerCells($Values, [string[]]$DateTimeNames = @()) {
     # 이름 → 엔진 값(순서 있는 표) → 장부 칸 목록 {name; v(엑셀 값); f(형식)}.
+    # DateTimeNames 의 열(처리일시 · 일시)은 0시여도 일시 형식(지금 판은 이 값이 늘 datetime 이라 늘 일시 형식).
     $cells = New-Object System.Collections.Generic.List[object]
     foreach ($name in $Values.Keys) {
         $value = $Values[$name]
-        $cells.Add(@{ name = [string]$name; v = (ConvertTo-ExcelValue $value); f = (Get-WriterFormat $value) })
+        $format = Get-WriterFormat $value
+        if ($value -is [datetime] -and $DateTimeNames -ccontains [string]$name) { $format = $script:WriterDateTimeFormat }
+        $cells.Add(@{ name = [string]$name; v = (ConvertTo-ExcelValue $value); f = $format })
     }
     return ,$cells.ToArray()
 }
@@ -896,14 +915,30 @@ function Get-BackupPath([string]$Path) {
     return Join-Path $folder ([IO.Path]::GetFileNameWithoutExtension($Path) + '.bak' + [IO.Path]::GetExtension($Path))
 }
 
+function Invoke-LedgerReplace([string]$Source, [string]$Destination, [string]$Backup) {
+    # [IO.File]::Replace(Win32 ReplaceFile). Backup 이 비면 백업 없이.
+    # 시험용 주입: 환경 변수 NOINSTALL_TEST_REPLACE_FAIL 이 있으면 ReplaceFile 이 중간에 실패한 상태를 만든다
+    #   (ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: 교체될 파일은 백업 이름 — 백업이 없으면 다른 이름 — 으로 옮겨졌고, 새 판은 제 이름 그대로).
+    if (-not [string]::IsNullOrEmpty($env:NOINSTALL_TEST_REPLACE_FAIL)) {
+        $moved = $Backup
+        if ([string]::IsNullOrEmpty($moved)) { $moved = $Destination + '.replaced-' + [Guid]::NewGuid().ToString('N').Substring(0, 8) }
+        if ([IO.File]::Exists($moved)) { [IO.File]::Delete($moved) }
+        [IO.File]::Move($Destination, $moved)
+        throw (New-Object System.IO.IOException '시험: 바꾸기 중간 실패(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 흉내)')
+    }
+    if ([string]::IsNullOrEmpty($Backup)) { [IO.File]::Replace($Source, $Destination, [NullString]::Value) }
+    else { [IO.File]::Replace($Source, $Destination, $Backup) }
+}
+
 function Complete-LedgerSave($Outcome, [string]$Tmp, [bool]$Existed) {
-    # tmp 를 장부로: 있던 장부는 바로 전 판을 .bak 으로 복사한 뒤 바꾸고(지금 판 save), 없던 장부는 옮긴다. 그 사이 누가 열었으면 locked.
+    # 다시 읽기를 통과한 tmp 를 장부로. 있던 장부는 ReplaceFile 한 번으로 바꾸며 바로 전 판을 .bak 으로 옮긴다(지금 판 save 의
+    # 「.bak 복사 → 바꾸기」 와 같은 시점 · 내용). 백업 이름을 주므로 바꾸기가 중간에 실패해도 바로 전 판은 장부 또는 .bak 이름으로 남고,
+    # 장부 이름에 파일이 없으면 .bak 을 장부 자리로 되살린다. 장부가 제자리에 없으면 tmp(새 판)는 지우지 않는다. 그 사이 누가 열었으면 locked.
     $path = $Outcome.path
     $backup = Get-BackupPath $path
     try {
         if ($Existed) {
-            [IO.File]::Copy($path, $backup, $true)
-            [IO.File]::Replace($Tmp, $path, [NullString]::Value)   # $null 은 글자 인수에서 '' 로 바뀌어 '경로 모양이 틀림'
+            Invoke-LedgerReplace $Tmp $path $backup
             $Outcome.backup = $backup
         } else {
             [IO.File]::Move($Tmp, $path)
@@ -911,11 +946,51 @@ function Complete-LedgerSave($Outcome, [string]$Tmp, [bool]$Existed) {
         }
         $Outcome.saved = $true
     } catch {
+        $reason = $_.Exception.Message
+        if ($Existed -and -not [IO.File]::Exists($path) -and [IO.File]::Exists($backup)) {
+            try { [IO.File]::Copy($backup, $path) } catch { }
+        }
+        if (-not [IO.File]::Exists($path) -and [IO.File]::Exists($Tmp)) {
+            throw ('누적장부를 저장하지 못함: {0} (새 판은 {1} 에 남겨 두었습니다)' -f $reason, $Tmp)
+        }
         if ((Test-FileLocked $path) -or (Test-FileLocked $backup)) { $Outcome.locked = $true; return }
-        throw ('누적장부를 저장하지 못함: ' + $_.Exception.Message)
+        throw ('누적장부를 저장하지 못함: ' + $reason)
     } finally {
-        if (Test-Path -LiteralPath $Tmp) { Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue }
+        if ([IO.File]::Exists($path)) { Remove-LedgerTmp $Tmp }
     }
+}
+
+function Remove-LedgerTmp([string]$Tmp) {
+    if (Test-Path -LiteralPath $Tmp) { Remove-Item -LiteralPath $Tmp -Force -ErrorAction SilentlyContinue }
+}
+
+function Assert-LedgerNotLost([string]$Path) {
+    # 장부가 없는데 바로 전 판(.bak)이 있으면 멈춘다: 새 장부를 만들면 다음 저장 때 .bak(그때까지의 이력)을 덮는다.
+    $backup = Get-BackupPath $Path
+    if (-not [IO.File]::Exists($Path) -and [IO.File]::Exists($backup)) {
+        $text = '누적장부 {0} 이 없는데 바로 전 판 {1} 이 있어 멈췄습니다. 새 장부를 만들면 다음 저장 때 {1} 의 기록을 덮습니다. ' +
+                '{1} 을 {0} 으로 복사해 되살리거나, 필요 없으면 {1} 을 다른 곳으로 옮긴 뒤 다시 실행하세요.'
+        throw ($text -f [IO.Path]::GetFileName($Path), [IO.Path]::GetFileName($backup))
+    }
+}
+
+function Invoke-LedgerStep([string]$LedgerPath, $Rules, $Entry, $Logs) {
+    # 장부 고친 판을 tmp 에 만든다(엑셀 한 번). 있던 장부는 원본이 아니라 임시 복사본을 연다. 결과 @{ raw; tmp; existed }.
+    $existed = [IO.File]::Exists($LedgerPath)
+    $tmp = Get-TmpPath $LedgerPath
+    $copy = $null
+    try {
+        $source = $LedgerPath
+        if ($existed) { $copy = New-OfficeCopy $LedgerPath '장부'; $source = $copy.Path }
+        $raw = (Invoke-ExcelWrite @((New-LedgerStep $source $existed $tmp $Rules $Entry $Logs)))[0]
+    } catch {
+        Remove-LedgerTmp $tmp
+        throw
+    } finally {
+        Remove-OfficeCopy $copy
+    }
+    $script:LedgerOpened = $raw.opened
+    return @{ raw = $raw; tmp = $tmp; existed = $existed }
 }
 
 function Get-LedgerRowProblems([string]$Where, $Header, $Row, $Want) {
@@ -971,8 +1046,8 @@ function Get-LedgerProblems($Raw, $Doc, $Number, $DocValues, $ItemValues) {
     return ,$problems
 }
 
-function New-LedgerStep([string]$Path, [bool]$Existed, $Rules, $Entry, $Logs) {
-    return @{ kind = 'ledger'; path = $Path; exists = $Existed; tmp = (Get-TmpPath $Path); layout = (Get-LedgerLayout $Rules)
+function New-LedgerStep([string]$Path, [bool]$Existed, [string]$Tmp, $Rules, $Entry, $Logs) {
+    return @{ kind = 'ledger'; path = $Path; exists = $Existed; tmp = $Tmp; layout = (Get-LedgerLayout $Rules)
               entry = $Entry; logs = [object[]]$Logs }
 }
 
@@ -985,6 +1060,7 @@ function Add-LedgerEntry([string]$LedgerPath, $Rules, $Result, [string]$SourceNa
     #   saved     바꿈. created = 새로 만든 장부, backup = 바로 전 판(.bak.xlsx) 경로. 되돌리려면 Undo-LedgerEntry.
     $outcome = New-LedgerOutcome $LedgerPath
     if (Test-FileLocked $LedgerPath) { $outcome.locked = $true; return $outcome }
+    Assert-LedgerNotLost $LedgerPath
     $result = ConvertTo-WriterResult $Rules $Result
     $doc = Get-WriterDoc $Rules $result.doc_type
     if ($When -eq [datetime]::MinValue) { $When = [datetime]::Now; $When = $When.AddTicks(- ($When.Ticks % [TimeSpan]::TicksPerSecond)) }
@@ -1007,19 +1083,14 @@ function Add-LedgerEntry([string]$LedgerPath, $Rules, $Result, [string]$SourceNa
     $itemRows = New-Object System.Collections.Generic.List[object]
     foreach ($values in $itemValues) { $itemRows.Add((ConvertTo-LedgerCells $values)) }
     $entry = @{ doc = [string]$doc.name; check_duplicate = $true; number_column = [string]$doc.number_field; number = (ConvertTo-FormatText $number)
-                doc_cells = (ConvertTo-LedgerCells $docValues); item_rows = $itemRows.ToArray() }
-    $existed = [IO.File]::Exists($LedgerPath)
-    $step = New-LedgerStep $LedgerPath $existed $Rules $entry @()
-    try {
-        $raw = (Invoke-ExcelWrite @($step))[0]
-        if ($raw.duplicate) { $outcome.duplicate = $true; return $outcome }
-        $problems = Get-LedgerProblems $raw $doc $number $docValues $itemValues
-        if ($problems.Count -gt 0) { $outcome.problems = [string[]]$problems.ToArray(); return $outcome }
-        Complete-LedgerSave $outcome $step.tmp $existed
-        return $outcome
-    } finally {
-        if (Test-Path -LiteralPath $step.tmp) { Remove-Item -LiteralPath $step.tmp -Force -ErrorAction SilentlyContinue }
-    }
+                doc_cells = (ConvertTo-LedgerCells $docValues @('처리일시')); item_rows = $itemRows.ToArray() }
+    $made = Invoke-LedgerStep $LedgerPath $Rules $entry @()
+    $raw = $made.raw
+    if ($raw.duplicate) { Remove-LedgerTmp $made.tmp; $outcome.duplicate = $true; return $outcome }
+    $problems = Get-LedgerProblems $raw $doc $number $docValues $itemValues
+    if ($problems.Count -gt 0) { Remove-LedgerTmp $made.tmp; $outcome.problems = [string[]]$problems.ToArray(); return $outcome }
+    Complete-LedgerSave $outcome $made.tmp $made.existed
+    return $outcome
 }
 
 function Add-LedgerLog([string]$LedgerPath, $Rules, $Entries) {
@@ -1027,6 +1098,7 @@ function Add-LedgerLog([string]$LedgerPath, $Rules, $Entries) {
     # $Entries = @(@{ when = [datetime]; file; outcome; reason } …). 결과는 Add-LedgerEntry 와 같은 모양(duplicate · problems 는 늘 비어 있음).
     $outcome = New-LedgerOutcome $LedgerPath
     if (Test-FileLocked $LedgerPath) { $outcome.locked = $true; return $outcome }
+    Assert-LedgerNotLost $LedgerPath
     $logs = New-Object System.Collections.Generic.List[object]
     foreach ($e in (ConvertTo-ItemArray $Entries)) {
         if ($null -eq $e) { continue }
@@ -1036,17 +1108,11 @@ function Add-LedgerLog([string]$LedgerPath, $Rules, $Entries) {
         $values['결과'] = [string](Get-MarkupProp $e 'outcome')
         $reason = Get-MarkupProp $e 'reason'
         $values['사유'] = if ([string]::IsNullOrEmpty([string]$reason)) { $null } else { [string]$reason }
-        $logs.Add((ConvertTo-LedgerCells $values))
+        $logs.Add((ConvertTo-LedgerCells $values @('일시')))
     }
-    $existed = [IO.File]::Exists($LedgerPath)
-    $step = New-LedgerStep $LedgerPath $existed $Rules $null $logs.ToArray()
-    try {
-        [void](Invoke-ExcelWrite @($step))
-        Complete-LedgerSave $outcome $step.tmp $existed
-        return $outcome
-    } finally {
-        if (Test-Path -LiteralPath $step.tmp) { Remove-Item -LiteralPath $step.tmp -Force -ErrorAction SilentlyContinue }
-    }
+    $made = Invoke-LedgerStep $LedgerPath $Rules $null $logs.ToArray()
+    Complete-LedgerSave $outcome $made.tmp $made.existed
+    return $outcome
 }
 
 function Undo-LedgerEntry($Added) {
@@ -1094,9 +1160,9 @@ function ConvertTo-OpJson($Map) {
 
 function Invoke-WriterOp($Payload) {
     # 엔진 op 'office_write'(시험용 입구). action:
-    #   company_form {folder, rules, result, markup_grid?}                  → {path, forced}
+    #   company_form {folder, rules, result, markup_grid?, exact?}          → {path, forced}
     #   check_file   {folder, rules, result, checks, source, company: bool, markup_grid?} → {path, forced}
-    #   ledger_add   {ledger, rules, result, source, when, organized?}       → {locked, duplicate, saved, problems, path, created, backup, forced}
+    #   ledger_add   {ledger, rules, result, source, when, organized?}       → {locked, duplicate, saved, problems, path, created, backup, opened, forced}
     #   ledger_log   {ledger, rules, logs: [{when, file, outcome, reason}]}  → 같은 모양
     #   ledger_dup   {ledger, rules, doc_type, number}                       → {duplicate, forced}
     #   undo_ledger  {added: ledger_add 의 결과}                             → {}
@@ -1134,7 +1200,7 @@ function Invoke-WriterOp($Payload) {
             $form = $rules.company_form
             if ($null -eq $form) { throw '규칙에 회사양식이 없습니다.' }
             $result = ConvertTo-WriterResult $rules $Payload.result
-            $path = Write-CompanyForm ([string]$Payload.folder) $result (Get-CompanyRows $result $form $markup) $form
+            $path = Write-CompanyForm ([string]$Payload.folder) $result (Get-CompanyRows $result $form $markup) $form -Exact:([bool](Get-MarkupProp $Payload 'exact'))
             return ConvertTo-OpJson ([ordered]@{ path = $path })
         }
         'check_file' {
@@ -1147,6 +1213,7 @@ function Invoke-WriterOp($Payload) {
         'ledger_add' {
             $organized = [string](Get-MarkupProp $Payload 'organized')
             $out = Add-LedgerEntry ([string]$Payload.ledger) $rules $Payload.result ([string]$Payload.source) (ConvertTo-OpDate ([string]$Payload.when)) $organized
+            $out['opened'] = $script:LedgerOpened      # 시험용: 엑셀이 연 파일(새 장부면 $null)
             return ConvertTo-OpJson $out
         }
         'ledger_log' {

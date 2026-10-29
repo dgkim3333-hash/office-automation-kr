@@ -96,8 +96,11 @@ def _iso(value: datetime) -> str:
 
 
 def ledger_add(run_engine, ledger, rules, result, source, when, organized):
-    return write(run_engine, "ledger_add", ledger=str(ledger), rules=rules_to_portable(rules), result=result_json(result),
-                 source=source, when=_iso(when), organized=str(organized))
+    """장부에 한 건. 엑셀이 연 파일 경로(opened, 시험용)는 떼고 돌려준다."""
+    out = write(run_engine, "ledger_add", ledger=str(ledger), rules=rules_to_portable(rules), result=result_json(result),
+                source=source, when=_iso(when), organized=str(organized))
+    out.pop("opened", None)
+    return out
 
 
 def documents(rules):
@@ -432,6 +435,120 @@ def test_timeout_leaves_nothing(tmp_path, clean_temp, run_engine, no_leftover):
     assert str(error.value) == "엑셀이 응답하지 않음"
     assert book.read_bytes() == data
     assert sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".xlsx") == ["누적장부.xlsx"]
+
+
+
+# --- 검토 수정 1회차 ---
+
+REPLACE_FAIL = "NOINSTALL_TEST_REPLACE_FAIL"   # 시험용 주입: 장부 바꾸기(ReplaceFile)가 중간에 실패한 상태를 흉내
+
+
+def data_rows(path, sheet):
+    return [r for r in openpyxl.load_workbook(path)[sheet].iter_rows(min_row=2, values_only=True) if any(v is not None for v in r)]
+
+
+@office
+@pytest.mark.office
+def test_replace_failure_keeps_ledger(tmp_path, clean_temp, run_engine, no_leftover, monkeypatch):
+    """장부 바꾸기가 중간에 실패해도(교체될 파일이 제 이름에서 옮겨진 상태) 장부는 원래 이름으로 넣기 전 판 그대로 있고
+    이력이 사라지지 않는다. 다시 실행하면 정상으로 넣는다."""
+    rules = example_rules()
+    docs = documents(rules)
+    book = tmp_path / "누적장부.xlsx"
+    ledger_add(run_engine, book, rules, *docs[0][:2], WHEN[0], docs[0][2])
+    data = book.read_bytes()
+
+    monkeypatch.setenv(REPLACE_FAIL, "1")
+    with pytest.raises(EngineError) as error:
+        ledger_add(run_engine, book, rules, *docs[1][:2], WHEN[1], docs[1][2])
+    assert "누적장부를 저장하지 못함" in str(error.value)
+    assert book.exists() and book.read_bytes() == data
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name != "temp" and not p.name.endswith(".json")) == [
+        "누적장부.bak.xlsx", "누적장부.xlsx"]
+
+    monkeypatch.delenv(REPLACE_FAIL)
+    out = ledger_add(run_engine, book, rules, *docs[1][:2], WHEN[1], docs[1][2])
+    assert out["saved"] is True
+    assert len(data_rows(book, "Invoice")) == 1 and len(data_rows(book, "DM")) == 1
+
+
+@office
+@pytest.mark.office
+def test_missing_ledger_with_backup_stops(tmp_path, clean_temp, run_engine, no_leftover):
+    """장부가 없는데 .bak.xlsx 가 있으면 새 장부를 만들지 않고 멈춘다(.bak 의 이력을 덮지 않게)."""
+    rules = example_rules()
+    docs = documents(rules)
+    book = tmp_path / "누적장부.xlsx"
+    backup = book.with_name("누적장부.bak.xlsx")
+    ledger_add(run_engine, book, rules, *docs[0][:2], WHEN[0], docs[0][2])
+    ledger_add(run_engine, book, rules, *docs[1][:2], WHEN[1], docs[1][2])
+    book.unlink()
+    data = backup.read_bytes()
+
+    with pytest.raises(EngineError) as error:
+        ledger_add(run_engine, book, rules, *docs[2][:2], WHEN[2], docs[2][2])
+    assert "누적장부.bak.xlsx" in str(error.value) and "없" in str(error.value)
+    with pytest.raises(EngineError):
+        write(run_engine, "ledger_log", ledger=str(book), rules=rules_to_portable(rules),
+              logs=[{"when": _iso(WHEN[2]), "file": "a.pdf", "outcome": "성공", "reason": ""}])
+    assert not book.exists() and backup.read_bytes() == data
+
+
+@office
+@pytest.mark.office
+def test_midnight_processed_at_is_datetime(tmp_path, clean_temp, run_engine, no_leftover):
+    """처리일시 · 처리로그 일시가 꼭 0시여도 일시 형식(지금 판과 같음). 날짜 필드(발행일)는 날짜 형식 그대로."""
+    rules = example_rules()
+    result, name, organized = documents(rules)[0]
+    midnight = datetime(2026, 10, 28, 0, 0, 0)
+    book = tmp_path / "누적장부.xlsx"
+    ledger_add(run_engine, book, rules, result, name, midnight, organized)
+    write(run_engine, "ledger_log", ledger=str(book), rules=rules_to_portable(rules),
+          logs=[{"when": _iso(midnight), "file": "a.pdf", "outcome": "성공", "reason": ""}])
+    py = tmp_path / "py.xlsx"
+    ledger = Ledger.open(py, rules)
+    ledger.add(result, name, organized, processed_at=midnight)
+    ledger.add_log(midnight, "a.pdf", "성공", "")
+    ledger.save()
+
+    got, want = book_view(book)["views"], book_view(py)["views"]
+    assert got["Invoice"]["cells"]["A2"] == want["Invoice"]["cells"]["A2"] == (midnight, "yyyy-mm-dd hh:mm:ss")
+    assert got["처리로그"]["cells"]["A2"] == want["처리로그"]["cells"]["A2"] == (midnight, "yyyy-mm-dd hh:mm:ss")
+    date_col = [k for k, v in got["Invoice"]["cells"].items() if k.endswith("2") and v[1] == "yyyy-mm-dd"]
+    assert date_col, "발행일 같은 날짜 필드는 날짜 형식"
+
+
+@office
+@pytest.mark.office
+def test_company_form_exact_name(tmp_path, clean_temp, run_engine, no_leftover):
+    """exact: 같은 이름의 회사 양식이 이미 있으면 _2 로 쓰지 않고 멈춘다(지금 판 job_run 은 확인필요). 있던 파일은 그대로."""
+    rules = example_rules()
+    portable = rules_to_portable(rules)
+    order = result_json(read_excel(ORDERS[0], rules))
+    first = Path(write(run_engine, "company_form", folder=str(tmp_path / "out"), rules=portable, result=order, exact=True)["path"])
+    data = first.read_bytes()
+
+    with pytest.raises(EngineError) as error:
+        write(run_engine, "company_form", folder=str(tmp_path / "out"), rules=portable, result=order, exact=True)
+    assert str(error.value) == f"출력 폴더에 {first.name} 이 이미 있습니다"
+    assert [p.name for p in (tmp_path / "out").iterdir()] == [first.name] and first.read_bytes() == data
+
+
+@office
+@pytest.mark.office
+def test_ledger_opened_from_copy(tmp_path, clean_temp, run_engine, no_leftover):
+    """있던 장부는 엑셀이 원본이 아니라 임시 복사본(%TEMP%\무설치판_*\같은 이름)을 연다. 복사본 폴더는 끝나면 지운다."""
+    rules = example_rules()
+    docs = documents(rules)
+    book = tmp_path / "누적장부.xlsx"
+    first = write(run_engine, "ledger_add", ledger=str(book), rules=rules_to_portable(rules), result=result_json(docs[0][0]),
+                  source=docs[0][1], when=_iso(WHEN[0]), organized=docs[0][2])
+    assert first["opened"] is None   # 새 장부는 열 파일이 없음
+    second = write(run_engine, "ledger_add", ledger=str(book), rules=rules_to_portable(rules), result=result_json(docs[1][0]),
+                   source=docs[1][1], when=_iso(WHEN[1]), organized=docs[1][2])
+    opened = Path(second["opened"])
+    assert second["saved"] is True
+    assert opened.name == book.name and opened.parent.parent == clean_temp and opened.parent.name.startswith("무설치판_")
 
 
 HOLDER = r"""
