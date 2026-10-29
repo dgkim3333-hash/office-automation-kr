@@ -3,13 +3,26 @@
 # 쓰는 법: 무설치판.ps1 -Command <명령> [-Input <json>] [-Output <json>] [-Culture <문화권>]
 #   엔진  시험용 입구. 입력 JSON 의 op 로 엔진 함수를 고르고 결과 JSON 을 -Output 에 쓴다.
 #         오류면 {"error": "사유"} 를 쓰고 반환 코드 1.
+#   실행  -Job NN [-Work <작업폴더>] [-Auto] [-Output <json>] [-NoNotify] [-Now yyyy-MM-ddTHH:mm:ss]
+#         작업 하나를 실행한다(lib\Run.ps1 의 Invoke-RunCommand). -Work 를 빼면 이 스크립트 폴더의 위(묶음 폴더).
+#         -Output 을 주면 보고(또는 {"error", "locked"})를 JSON 으로 쓴다. 끝은 늘 [Environment]::Exit(반환 코드):
+#         0 정상 · 1 멈춤(시작 못함 · 처리기록을 못 씀) · 2 같은 작업이 실행 중 · 3 그 밖의 오류(작업 없음 등).
+#         (시간 제한으로 버려 둔 오피스 runspace 가 남아 있어도 프로세스가 끝나게 Exit 로 끝낸다.)
+#         시험용: -NoNotify(알림 끔) · -WordTimeoutSec <초>(워드 시간 제한) · -TestPdfWarningOff 0|1(PDF 안내 설정 확인 결과 대신)
 # -Culture 를 주면 그 문화권(예: de-DE)으로 스레드를 바꾼 뒤 돈다(문화권에 흔들리지 않는지 시험할 때).
 # ($Input 은 PowerShell 자동 변수라 이름을 InputPath · OutputPath 로 두고 -Input · -Output 은 별칭으로 받는다.)
 param(
     [Parameter(Mandatory = $true)][string]$Command,
     [Alias('Input')][string]$InputPath,
     [Alias('Output')][string]$OutputPath,
-    [string]$Culture
+    [string]$Culture,
+    [int]$Job = 0,
+    [string]$Work,
+    [string]$Now,
+    [switch]$Auto,
+    [switch]$NoNotify,
+    [int]$WordTimeoutSec = -1,
+    [string]$TestPdfWarningOff
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +37,8 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'lib\Company.ps1')
 . (Join-Path $PSScriptRoot 'lib\Office.ps1')
 . (Join-Path $PSScriptRoot 'lib\Writers.ps1')
+. (Join-Path $PSScriptRoot 'lib\Notify.ps1')
+. (Join-Path $PSScriptRoot 'lib\Run.ps1')
 
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 
@@ -73,6 +88,11 @@ $script:EngineOps = @{
         param($Payload)
         Invoke-WriterOp $Payload
     }
+    'notify' = {
+        # 입력 {action, ...}: 알림 글자 · 알림 XML(Notify.ps1 의 Invoke-NotifyOp 주석 참고). 알림은 띄우지 않는다.
+        param($Payload)
+        Invoke-NotifyOp $Payload
+    }
 }
 
 # 명령: 뒤 작업이 실행 · 점검 · 준비 · 놓친실행 을 여기에 더한다.
@@ -82,6 +102,19 @@ $script:Commands = @{
         $op = [string]$payload.op
         if (-not $script:EngineOps.ContainsKey($op)) { throw "엔진 op '$op' 는 없습니다." }
         Write-JsonFile $OutputPath (& $script:EngineOps[$op] $payload)
+    }
+    '실행' = {
+        if ($Job -le 0) { throw '작업 번호(-Job NN)를 주세요.' }
+        $workFolder = $Work
+        if ([string]::IsNullOrEmpty($workFolder)) { $workFolder = Split-Path -Parent $PSScriptRoot }
+        $when = [datetime]::MinValue
+        if ($Now) { $when = [datetime]::ParseExact($Now, 'yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+        if ($WordTimeoutSec -ge 0) { $script:RunWordTimeoutSec = $WordTimeoutSec }
+        if ($TestPdfWarningOff) { $script:RunPdfWarningOff = ($TestPdfWarningOff -eq '1') }
+        $label = if ($Auto) { '자동 실행' } else { '지금 실행' }
+        $code = Invoke-RunCommand $workFolder $Job $when $label ([bool]$NoNotify) $OutputPath
+        [Console]::Out.Flush()
+        [Environment]::Exit($code)
     }
 }
 

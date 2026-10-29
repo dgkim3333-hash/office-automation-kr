@@ -199,7 +199,8 @@ function ConvertTo-CheckModel($Rules, $Result, $Doc) {
     $rawTable = Get-ResultMember $Result 'table'
     if ($null -ne $rawTable) {
         $table = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($rawRow in @($rawTable)) {
+        # (@() 로 감싸지 않는다: 5.1 은 해시표가 든 List 를 @() 로 펼치면 "Argument types do not match" — 메모리 결과의 품목 표)
+        foreach ($rawRow in $rawTable) {
             $row = New-OrderedMap
             foreach ($entry in (Get-MapEntries $rawRow)) {
                 $format = $null
