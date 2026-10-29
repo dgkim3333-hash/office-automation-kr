@@ -15,7 +15,7 @@
 #   놓친실행  [-Work <작업폴더>] [-Now …] [-Output <json>] [-NoNotify]  시작프로그램 바로가기가 부름(오늘 시각이 지났는데 안 돈 작업).
 #   점검  -File <PDF 또는 xlsx> -Rules <규칙.json>  대표 PC 에서 무설치판으로 읽은 결과 표(지금 판 check 와 같은 표)를 콘솔에 찍는다.
 #   -TestHooks <json>: 시험용 끼우기(진짜 예약 작업 · 바탕화면 · 알림 · 폴더 고르기 창을 쓰지 않게). 열쇠:
-#         schedule ok|fail · desktop · startup_dir · pick [폴더…] · self_test pass|pdf_fail|excel_fail · notice_file · lock_retry [간격, 한도]
+#         schedule ok|fail · schedule_log · desktop · startup_dir · pick [폴더…] · self_test pass|pdf_fail|excel_fail · notice_file · lock_retry [간격, 한도]
 # -Culture 를 주면 그 문화권(예: de-DE)으로 스레드를 바꾼 뒤 돈다(문화권에 흔들리지 않는지 시험할 때).
 # ($Input 은 PowerShell 자동 변수라 이름을 InputPath · OutputPath 로 두고 -Input · -Output 은 별칭으로 받는다.)
 param(
@@ -176,7 +176,14 @@ $script:Commands = @{
             foreach ($key in @('desktop', 'startup_dir')) { if (-not (Get-HookValue $key)) { throw "시험용 끼우기에 $key 가 없습니다." } }
             $options.Desktop = [string](Get-HookValue 'desktop')
             $options.StartupDir = [string](Get-HookValue 'startup_dir')
-            if ([string](Get-HookValue 'schedule') -ceq 'ok') { $options.RegisterTask = { param($Text, $TaskPath, $TaskName) $true } }
+            if ([string](Get-HookValue 'schedule') -ceq 'ok') {
+                $log = [string](Get-HookValue 'schedule_log')   # 가짜 등록한 작업 이름을 한 줄씩(같은 예약을 다시 쓰는지 보려고)
+                $options.RegisterTask = {
+                    param($Text, $TaskPath, $TaskName)
+                    if ($log) { [IO.File]::AppendAllText($log, $TaskName + "`n", (New-Object Text.UTF8Encoding($false))) }
+                    $true
+                }.GetNewClosure()
+            }
             else { $options.RegisterTask = { param($Text, $TaskPath, $TaskName) throw '시험: 작업 스케줄러 막힘' } }
             $queue = New-Object 'System.Collections.Generic.Queue[string]'
             foreach ($folder in @(Get-HookValue 'pick')) { if ($null -ne $folder) { $queue.Enqueue([string]$folder) } }
@@ -212,7 +219,7 @@ try {
     exit 0
 } catch {
     $message = $_.Exception.Message
-    if ($OutputPath) { Write-JsonFile $OutputPath (ConvertTo-Json -InputObject @{ error = $message }) }
+    if ($OutputPath) { Write-JsonFile $OutputPath (ConvertTo-Json -InputObject @{ error = $message } -Depth 20) }
     [Console]::Error.WriteLine($message)
     exit 1
 }

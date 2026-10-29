@@ -83,7 +83,10 @@ function Get-SetupJob([string]$Folder, [string]$Work) {
     return $job
 }
 
-function Get-TaskName($Job) { return '{0:D2}_{1}' -f $Job.number, (Get-FolderTitle $Job.title) }
+function Get-TaskName($Job) {
+    # 예약 이름 = 작업 폴더 이름(NN_제목). 제목이 바뀐 새 묶음으로 다시 준비해도 폴더 이름이 그대로라 같은 예약을 고쳐 쓴다.
+    return [IO.Path]::GetFileName($Job.folder)
+}
 
 function Get-PortableArguments([string]$Command, [string]$Work) {
     # 작업 스케줄러 · 시작프로그램이 powershell.exe 에 넘기는 인수(창 없이).
@@ -94,6 +97,7 @@ function Get-PortableArguments([string]$Command, [string]$Work) {
 function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [string]$WorkDir, [string]$Description) {
     # 바로가기 하나(있으면 덮어씀, 지금 판 shortcuts.create). WScript.Shell(Windows 기본)만 쓴다. 만든 뒤 파일이 생겼는지 본다.
     $shell = New-Object -ComObject WScript.Shell
+    $link = $null
     try {
         $link = $shell.CreateShortcut($Path)
         $link.TargetPath = $Target
@@ -101,8 +105,8 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [strin
         $link.WorkingDirectory = $WorkDir
         $link.Description = $Description
         $link.Save()
-        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($link)
     } finally {
+        if ($null -ne $link) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($link) }
         [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
     }
     if (-not [IO.File]::Exists($Path)) { throw '바로가기 파일이 생기지 않았습니다' }
@@ -110,12 +114,12 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [strin
 
 function Read-Shortcut([string]$Path) {
     $shell = New-Object -ComObject WScript.Shell
+    $link = $null
     try {
         $link = $shell.CreateShortcut($Path)
-        $out = [ordered]@{ target = [string]$link.TargetPath; arguments = [string]$link.Arguments; workdir = [string]$link.WorkingDirectory }
-        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($link)
-        return $out
+        return [ordered]@{ target = [string]$link.TargetPath; arguments = [string]$link.Arguments; workdir = [string]$link.WorkingDirectory }
     } finally {
+        if ($null -ne $link) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($link) }
         [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
     }
 }
@@ -490,17 +494,50 @@ function Write-ExampleMarkup([string]$Path) {
 }
 
 function Copy-JobRules([string]$Source, [string]$Target) {
-    # 묶음의 규칙.json 을 작업 폴더로(같은 폴더면 그대로 둔다). 임시 파일에 쓴 뒤 바꾼다.
+    # 묶음의 규칙.json · 작업.json 을 작업 폴더로(같은 폴더면 그대로 둔다). 작업.json 도 옮겨야 다음 준비가 옛 제목으로 되돌리지 않는다
+    # (작업 폴더 = 묶음에서 제목이 바뀐 새 묶음 폴더는 옮긴 뒤 치운다). 임시 파일에 쓴 뒤 바꾼다.
     if (Test-SameDir $Source $Target) { return }
-    $from = Join-Path $Source $script:RulesFile
-    $to = Join-Path $Target $script:RulesFile
-    $tmp = $to + '.tmp'
-    [IO.File]::Copy($from, $tmp, $true)
-    if ([IO.File]::Exists($to)) { [IO.File]::Replace($tmp, $to, [NullString]::Value) } else { [IO.File]::Move($tmp, $to) }
+    foreach ($name in @($script:RulesFile, $script:JobInfoFile)) {
+        $from = Join-Path $Source $name
+        $to = Join-Path $Target $name
+        $tmp = $to + '.tmp'
+        [IO.File]::Copy($from, $tmp, $true)
+        if ([IO.File]::Exists($to)) { [IO.File]::Replace($tmp, $to, [NullString]::Value) } else { [IO.File]::Move($tmp, $to) }
+    }
 }
 
-function Set-JobAutomation($Job, [scriptblock]$RegisterTask, [string]$StartupDir, [string]$Desktop) {
-    # 매일 실행 등록 + 바탕화면 「지금 실행」 (지금 판 _install_automation).
+function Select-BundleJob($Sources, [int]$Number) {
+    # 묶음에서 그 번호의 작업 폴더 하나. 같은 번호가 여럿이면(제목이 바뀐 새 묶음을 덮어써 옛 폴더가 남음) 이 PC 에서 준비된
+    # 폴더(작업설정.json 있음)가 아닌 것 중 규칙.json 이 가장 새것(새 묶음).
+    $same = @($Sources | Where-Object { (Get-FolderNumber $_) -eq $Number })
+    $fresh = @($same | Where-Object { -not [IO.File]::Exists((Join-Path $_ $script:SettingsFile)) })
+    if ($fresh.Count -eq 0) { $fresh = $same }
+    return ($fresh | Sort-Object { [IO.File]::GetLastWriteTimeUtc((Join-Path $_ $script:RulesFile)) } -Descending | Select-Object -First 1)
+}
+
+function Remove-StaleJobFolder([string]$Folder, [string]$Target) {
+    # 같은 번호의 남은 묶음 폴더(작업설정 없음)를 치운다: 규칙.json · 작업.json 만 있으면 지우고, 다른 것이 있으면 지우지 않고
+    # 이름 앞에 「지난묶음_」 을 붙인다(실행이 작업 폴더로 보지 않음). 화면에 쓸 한 줄을 돌려준다.
+    $name = [IO.Path]::GetFileName($Folder)
+    $known = @($script:RulesFile, $script:JobInfoFile)
+    $extra = @([IO.Directory]::GetFileSystemEntries($Folder) | Where-Object { $known -notcontains [IO.Path]::GetFileName($_) })
+    if ($extra.Count -eq 0) {
+        [IO.Directory]::Delete($Folder, $true)
+        return "정리: 같은 번호의 옛 묶음 폴더 $name 을 지웠습니다(새 규칙은 $Target 에 넣었습니다)."
+    }
+    $moved = Join-Path ([IO.Path]::GetDirectoryName($Folder)) ('지난묶음_' + $name)
+    $n = 2
+    while ([IO.Directory]::Exists($moved) -or [IO.File]::Exists($moved)) { $moved = Join-Path ([IO.Path]::GetDirectoryName($Folder)) ("지난묶음_{0}_{1}" -f $n, $name); $n++ }
+    [IO.Directory]::Move($Folder, $moved)
+    return "정리: 같은 번호의 옛 묶음 폴더 $name 을 $([IO.Path]::GetFileName($moved)) 로 이름을 바꿨습니다."
+}
+
+function Set-JobAutomation($Job, [scriptblock]$RegisterTask, [string]$StartupDir, [string]$Desktop, [string]$OldTitle) {
+    # 매일 실행 등록 + 바탕화면 「지금 실행」 (지금 판 _install_automation). 제목이 바뀌었으면($OldTitle) 옛 이름의 바로가기를 지운다.
+    if ($OldTitle -and (Get-FolderTitle $OldTitle) -ne (Get-FolderTitle $Job.title)) {
+        $old = Join-Path $Desktop ($script:RunNowLink -f (Get-FolderTitle $OldTitle))
+        try { if ([IO.File]::Exists($old)) { [IO.File]::Delete($old) } } catch { Write-SetupLine "  경고: 옛 바로가기를 지우지 못함 ($($_.Exception.Message))" }
+    }
     $notes = New-Object System.Collections.Generic.List[string]
     $method = Register-PortableSchedule $Job -RegisterTask $RegisterTask -StartupDir $StartupDir -Notes $notes
     Write-SetupLine "  $(Get-MethodLine $Job $method)"
@@ -554,15 +591,26 @@ function Invoke-Setup([string]$BundleDir, [string]$Work, [scriptblock]$FolderPic
     else { Write-SetupLine "자체 시험: $($test.message)" }
 
     $code = 0
-    foreach ($source in $sources) {
+    foreach ($number in @($sources | ForEach-Object { Get-FolderNumber $_ } | Sort-Object -Unique)) {
+        $source = Select-BundleJob $sources $number
         $info = Read-SetupJson (Join-Path $source $script:JobInfoFile)
-        $number = Get-FolderNumber $source
+        $title = [string]$info.title
+        $mode = [string]$info.output_mode
+        if ($script:OutputModes -notcontains $mode) {
+            Write-SetupLine ("{0}: 작업.json 의 출력 방식 '{1}' 을 쓸 수 없습니다. 대표에게 알려 주세요." -f [IO.Path]::GetFileName($source), $mode)
+            $code = 1
+            continue
+        }
         $prefix = '{0:D2}_' -f $number
-        $target = @(Get-PortableJobFolders $Work | Where-Object { ([IO.Path]::GetFileName($_)).StartsWith($prefix, [StringComparison]::Ordinal) }) | Select-Object -First 1
+        # 번호로 맞춘다: 이 PC 에 이미 준비된 같은 번호 작업(작업설정.json 이 있음)이 있으면 그 폴더(이름 그대로)를 쓴다
+        $target = @(Get-PortableJobFolders $Work | Where-Object {
+            ([IO.Path]::GetFileName($_)).StartsWith($prefix, [StringComparison]::Ordinal) -and [IO.File]::Exists((Join-Path $_ $script:SettingsFile)) }) |
+            Select-Object -First 1
         if ($null -eq $target) { $target = Join-Path (Join-Path $Work $script:JobsDir) ([IO.Path]::GetFileName($source)) }
         $name = [IO.Path]::GetFileName($target)
         if ([IO.File]::Exists((Join-Path $target $script:SettingsFile))) {
-            # 이미 있는 작업: 규칙만 새것으로. 입력 · 출력 폴더 · 처리기록 · 장부는 그대로(실행과 겹치지 않게 잠그고)
+            # 이미 있는 작업: 규칙 · 대표가 정하는 값(제목 · 출력 방식)만 새것으로. 입력 · 출력 폴더 · 시각 · 처리기록 · 장부는 그대로
+            # (실행과 겹치지 않게 잠그고). 예약 이름 · 폴더 이름은 그대로라 예약 · 바로가기가 늘지 않는다.
             try { $lock = Enter-JobLock $target $name } catch {
                 Write-SetupLine "${name}: 지금 실행 중이라 바꾸지 못했습니다. 실행이 끝난 뒤 준비.bat 을 다시 두 번 클릭하세요."
                 $code = 1
@@ -570,32 +618,50 @@ function Invoke-Setup([string]$BundleDir, [string]$Work, [scriptblock]$FolderPic
             }
             try {
                 $job = Get-SetupJob $target $Work
+                $oldTitle = $job.title
                 Copy-JobRules $source $target
+                Save-JobSettingsValues $job ([ordered]@{ title = $title; output_mode = $mode })
+                $job.title = $title
+                $job.output_mode = $mode
                 Write-SetupLine "${name}: 규칙을 새것으로 바꿨습니다(입력 · 출력 폴더 · 처리기록 · 장부는 그대로)."
-                Set-JobAutomation $job $RegisterTask $StartupDir $Desktop
+                Set-JobAutomation $job $RegisterTask $StartupDir $Desktop $oldTitle
             } catch {
                 Write-SetupLine "${name}: 바꾸지 못했습니다 ($($_.Exception.Message)). 대표에게 알려 주세요."
                 $code = 1
             } finally {
                 Exit-JobLock $lock
             }
-            continue
+        } else {
+            Write-SetupLine "${name}: 새 작업입니다. 입력 폴더와 출력 폴더를 고르세요."
+            $inputDir = Select-LocalFolder $FolderPicker "$title - 입력 폴더(PO 가 들어오는 폴더)를 고르세요"
+            if (-not $inputDir) { return Stop-Setup '폴더를 고르지 않아 준비를 멈췄습니다. 준비.bat 을 다시 두 번 클릭하세요.' }
+            $outputDir = Select-LocalFolder $FolderPicker "$title - 출력 폴더(회사 양식 · 누적장부를 둘 폴더)를 고르세요"
+            if (-not $outputDir) { return Stop-Setup '폴더를 고르지 않아 준비를 멈췄습니다. 준비.bat 을 다시 두 번 클릭하세요.' }
+            [void][IO.Directory]::CreateDirectory($target)
+            Copy-JobRules $source $target
+            $settings = [ordered]@{
+                number = $number; title = $title; input_dir = $inputDir; output_dir = $outputDir
+                output_mode = $mode; time = (Get-SlotTime $number); method = $script:MethodNone; last_run = $null
+            }
+            [IO.File]::WriteAllText((Join-Path $target $script:SettingsFile), (ConvertTo-Json -InputObject $settings -Depth 20), $script:RunUtf8)
+            Write-SetupLine "${name}: 입력 $inputDir · 출력 $outputDir"
+            Set-JobAutomation (Get-SetupJob $target $Work) $RegisterTask $StartupDir $Desktop
         }
-        $title = [string]$info.title
-        Write-SetupLine "${name}: 새 작업입니다. 입력 폴더와 출력 폴더를 고르세요."
-        $inputDir = Select-LocalFolder $FolderPicker "$title - 입력 폴더(PO 가 들어오는 폴더)를 고르세요"
-        if (-not $inputDir) { return Stop-Setup '폴더를 고르지 않아 준비를 멈췄습니다. 준비.bat 을 다시 두 번 클릭하세요.' }
-        $outputDir = Select-LocalFolder $FolderPicker "$title - 출력 폴더(회사 양식 · 누적장부를 둘 폴더)를 고르세요"
-        if (-not $outputDir) { return Stop-Setup '폴더를 고르지 않아 준비를 멈췄습니다. 준비.bat 을 다시 두 번 클릭하세요.' }
-        [void][IO.Directory]::CreateDirectory($target)
-        Copy-JobRules $source $target
-        $settings = [ordered]@{
-            number = $number; title = $title; input_dir = $inputDir; output_dir = $outputDir
-            output_mode = [string]$info.output_mode; time = (Get-SlotTime $number); method = $script:MethodNone; last_run = $null
+        # 같은 번호의 다른 폴더(제목이 바뀐 새 묶음을 덮어써 남은 것)는 실행이 「폴더가 여럿」 으로 멈추지 않게 치운다
+        foreach ($other in @(Get-PortableJobFolders $Work)) {
+            if (-not ([IO.Path]::GetFileName($other)).StartsWith($prefix, [StringComparison]::Ordinal) -or (Test-SameDir $other $target)) { continue }
+            if ([IO.File]::Exists((Join-Path $other $script:SettingsFile))) {
+                Write-SetupLine "경고: 작업 $number 폴더가 여럿입니다($([IO.Path]::GetFileName($other))). 대표에게 알려 주세요."
+                $code = 1
+                continue
+            }
+            try {
+                Write-SetupLine (Remove-StaleJobFolder $other $name)
+            } catch {
+                Write-SetupLine "경고: 옛 묶음 폴더 $([IO.Path]::GetFileName($other)) 를 치우지 못함 ($($_.Exception.Message)). 지우고 준비.bat 을 다시 두 번 클릭하세요."
+                $code = 1
+            }
         }
-        [IO.File]::WriteAllText((Join-Path $target $script:SettingsFile), (ConvertTo-Json -InputObject $settings -Depth 20), $script:RunUtf8)
-        Write-SetupLine "${name}: 입력 $inputDir · 출력 $outputDir"
-        Set-JobAutomation (Get-SetupJob $target $Work) $RegisterTask $StartupDir $Desktop
     }
 
     $markup = Join-Path $Work $script:MarkupFile

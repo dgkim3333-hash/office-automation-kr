@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import msvcrt
+import os
 import re
 import shutil
 import subprocess
@@ -252,6 +253,10 @@ def test_bat_files():
     assert 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0무설치판.ps1" -Command 준비' in text
     run = RUN_BAT.read_bytes().decode("utf-8-sig")
     assert '-Command 실행 -Job %1 %2 %3' in run
+    for bat in PORTABLE.rglob("*.bat"):   # 작업 트리의 바이트 그대로(묶음은 이 파일들을 복사한다): BOM + 줄끝 모두 CRLF
+        data = bat.read_bytes()
+        assert data.startswith(b"\xef\xbb\xbf") and data.endswith(b"\r\n"), bat.name
+        assert data.count(b"\n") == data.count(b"\r\n"), f"LF 만 있는 줄: {bat.name}"
 
 
 # --- 놓친 실행 · 자동 실행 실패 알림 (오피스 없이: 입력 폴더가 비어 있음) ---
@@ -446,6 +451,64 @@ def test_setup_in_bundle_folder(tmp_path):
     assert "자동 실행: Windows 작업 스케줄러 (매일 16:20)" in text
 
 
+def _rename_in_bundle(bundle: Path, rules_text: str, fingerprint: str) -> Path:
+    """대표가 같은 번호 작업의 제목을 바꾼 새 묶음(01_새 제목, 출력 방식 둘다)을 친구가 덮어쓴 모양: 옛 폴더는 그대로 남는다."""
+    new = make_bundle(bundle, rules_text, title="새 제목", mode="둘다")
+    data = json.loads((new / "규칙.json").read_text(encoding="utf-8"))
+    data["fingerprint"] = fingerprint
+    (new / "규칙.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return new
+
+
+def _job_folders(work: Path) -> list[str]:
+    return sorted(p.name for p in (work / "작업").iterdir() if p.is_dir())
+
+
+@pytest.mark.parametrize("layout", ["work_is_bundle", "work_apart"])
+def test_setup_renamed_job_keeps_one_folder(layout, tmp_path):
+    """같은 번호 · 다른 제목의 새 묶음으로 다시 준비: 번호로 맞춰 친구 PC 의 옛 폴더(이름 그대로)를 쓰고, 규칙 · 대표 값(제목 ·
+    출력 방식)만 새것으로. 입력 · 출력 · 시각 · 처리기록 · last_run 은 그대로, 폴더를 묻지 않고, 폴더 · 예약 · 바로가기는 하나."""
+    bundle, work, inp, out = _setup_dirs(tmp_path)
+    if layout == "work_is_bundle":
+        work = bundle   # 친구 PC 기본 모양: 묶음 폴더가 곧 작업 폴더
+        (work / "마크업표.xlsx").write_bytes(b"x")
+    old = make_bundle(bundle, example_text(), title="옛 제목")
+    log = tmp_path / "예약.txt"
+    code, text = run_setup(bundle, work, write_hooks(tmp_path, pick=[str(inp), str(out)], schedule="ok", schedule_log=str(log)))
+    assert code == 0, text
+    folder = work / "작업" / "01_옛 제목"
+    (folder / "처리기록.csv").write_bytes("\ufeff지문,파일\r\nabc,x.pdf\r\n".encode("utf-8"))
+    first = settings(folder)
+    first["last_run"] = "2026-10-29"
+    (folder / "작업설정.json").write_text(json.dumps(first, ensure_ascii=False), encoding="utf-8")
+    os.utime(old / "규칙.json", (time.time() - 3600, time.time() - 3600))   # 옛 묶음 파일이 더 오래됨
+    new = _rename_in_bundle(bundle, example_text(), "9" * 16)
+    new_rules = (new / "규칙.json").read_bytes()
+
+    code, text = run_setup(bundle, work, write_hooks(tmp_path, pick=[], schedule="ok", schedule_log=str(log)))
+    assert code == 0, text
+    assert "폴더 고르기" not in text
+    assert _job_folders(work) == ["01_옛 제목"]
+    assert (folder / "규칙.json").read_bytes() == new_rules
+    second = settings(folder)
+    assert (second["title"], second["output_mode"]) == ("새 제목", "둘다")
+    for key in ("input_dir", "output_dir", "number", "time", "method", "last_run"):
+        assert second[key] == first[key], key
+    assert (folder / "처리기록.csv").read_bytes() == "\ufeff지문,파일\r\nabc,x.pdf\r\n".encode("utf-8")
+    assert sorted(set(log.read_text(encoding="utf-8-sig").splitlines())) == ["01_옛 제목"]   # 예약 하나(같은 작업 이름을 다시 씀)
+    assert sorted(p.name for p in (tmp_path / "desktop").iterdir()) == ["지금 실행 - 새 제목.lnk"]
+
+    code, text = run_setup(bundle, work, write_hooks(tmp_path, pick=[], schedule="ok", schedule_log=str(log)))
+    assert code == 0, text   # 한 번 더 준비해도 옛 제목 · 옛 규칙으로 되돌아가지 않는다
+    assert _job_folders(work) == ["01_옛 제목"] and (folder / "규칙.json").read_bytes() == new_rules
+    assert settings(folder)["title"] == "새 제목"
+
+    report = tmp_path / "보고.json"
+    code, text = powershell("-Command", "실행", "-Job", "1", "-Work", str(work), "-Output", str(report),
+                            "-NoNotify", "-TestPdfWarningOff", "1")
+    assert code == 0, text
+
+
 def test_rejects_onedrive_folder(tmp_path):
     """고른 폴더가 OneDrive 아래 → 지금 판 check_work_dir 와 같은 거부 문구, 다시 고르게 하고, 취소하면 준비를 멈춘다."""
     bundle, work, _, _ = _setup_dirs(tmp_path)
@@ -501,6 +564,25 @@ def test_pdf_self_test_failure_is_kept_and_blocks_pdfs(tmp_path):
     assert report["has_news"] is True
     assert any("PDF 1개를 처리하지 않았습니다" in a and PDF_DIFFERENT in a for a in report["alerts"])
     assert files(out) == []
+
+
+def test_excel_self_test_failure_blocks_excel_pos(tmp_path):
+    """자체시험결과.json 의 excel_ok 가 거짓이면(다시 준비하다 엑셀 시험이 틀림) 매일 실행도 엑셀 PO 를 기록 없이 두고 알린다."""
+    env = Env(tmp_path, "누적장부", example_text())
+    (env.work / "자체시험결과.json").write_text(json.dumps(
+        {"pdf_ok": True, "excel_ok": False, "date": "2026-10-30", "office_version": "16.0",
+         "message": "이 PC 의 엑셀은 엑셀 PO 를 다르게 읽습니다", "detail": ""}, ensure_ascii=False), encoding="utf-8")
+    drop(ACME, env.inp)
+    report_path = tmp_path / "보고.json"
+    code, text = powershell("-Command", "실행", "-Job", "1", "-Work", str(env.work), "-Output", str(report_path),
+                            "-NoNotify", "-TestPdfWarningOff", "1")
+    assert code == 0, text
+    report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+    assert report["counts"] == {"성공": 0, "중복": 0, "확인필요": 0, "보류": 0}
+    assert env.records() == [] and env.log() == [] and files(env.out) == []
+    assert report["has_news"] is True
+    assert any("엑셀 PO 1개를 처리하지 않았습니다" in a and "이 PC 의 엑셀은 엑셀 PO 를 다르게 읽습니다" in a
+               for a in report["alerts"]), report["alerts"]
 
 
 # --- 오피스 ---

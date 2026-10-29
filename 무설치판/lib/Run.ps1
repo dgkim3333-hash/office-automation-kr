@@ -44,6 +44,8 @@ $script:PdfWarningAlert = "워드의 PDF 변환 안내가 켜져 있어 PDF {0}�
 # 준비(작업 10)의 자체 시험에서 PDF 가 정답과 달랐으면 작업 폴더의 자체시험결과.json 에 pdf_ok = false 가 남는다. 그동안 PDF 는 위 안내와 같은 길로 둔다
 $script:SelfTestResultFile = '자체시험결과.json'
 $script:SelfTestPdfAlert = '준비 때 자체 시험에서 PDF 를 통과하지 못해 PDF {0}개를 처리하지 않았습니다(입력 폴더에 그대로 두었습니다). 준비.bat 을 다시 두 번 클릭해도 그대로면 대표에게 알려 주세요. 자체 시험: '
+# excel_ok = false 도 같은 길: 엑셀 PO 를 기록 없이 둔다(엑셀이 다르게 읽는 PC 에서 결과 · 장부에 들어가지 않게)
+$script:SelfTestExcelAlert = '준비 때 자체 시험에서 엑셀을 통과하지 못해 엑셀 PO {0}개를 처리하지 않았습니다(입력 폴더에 그대로 두었습니다). 준비.bat 을 다시 두 번 클릭해도 그대로면 대표에게 알려 주세요. 자체 시험: '
 # 자동 실행 · 놓친 실행이 잠긴 작업을 만나면 이 간격(초)으로 이 시간(초)까지 다시 해 본다(지금 판 schedule.retry_locked). 시험에서만 줄인다
 $script:LockRetrySeconds = 30
 $script:LockRetryLimitSeconds = 15 * 60
@@ -350,7 +352,7 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
         source = $Job.input_dir; report = (New-RunReport); warnings = (New-Object System.Collections.Generic.List[string])
         stop_reason = ''; ledger_locked = $false; ledger_held = 0; ledger_stop = $null
         markup_used = $false; markup_bytes = $null; markup_read_error = ''; markup_table = $null; markup_fp = ''
-        pdf_skipped = 0; pdf_ok = $true; pdf_self_test = $null
+        pdf_skipped = 0; pdf_ok = $true; pdf_self_test = $null; excel_skipped = 0; excel_self_test = $null
     }
     $R = $script:Run
     $stop = Get-PreflightProblem $Job
@@ -389,7 +391,8 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
     foreach ($row in $R.state.Values) {
         if ((Get-RecordValue $row '상태') -eq '성공') { [void]$R.success_keys.Add((Get-RecordValue $row '문서종류') + "`0" + (Get-RecordValue $row '번호')) }
     }
-    $R.pdf_self_test = Get-SelfTestPdfProblem $Work
+    $R.pdf_self_test = Get-SelfTestProblem $Work 'pdf_ok'
+    $R.excel_self_test = Get-SelfTestProblem $Work 'excel_ok'
     if ($null -ne $R.pdf_self_test) { $R.pdf_ok = $false }
     elseif ($null -ne $script:RunPdfWarningOff) { $R.pdf_ok = [bool]$script:RunPdfWarningOff }
     else { $R.pdf_ok = Test-PdfWarningOff }
@@ -411,6 +414,7 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
         if ($null -ne $R.pdf_self_test) { $R.report.alerts.Add(($script:SelfTestPdfAlert -f $R.pdf_skipped) + $R.pdf_self_test) }
         else { $R.report.alerts.Add(($script:PdfWarningAlert -f $R.pdf_skipped)) }
     }
+    if ($R.excel_skipped -gt 0) { $R.report.alerts.Add(($script:SelfTestExcelAlert -f $R.excel_skipped) + $R.excel_self_test) }
 
     try {
         Save-JobLastRun $Job $R.today
@@ -430,18 +434,18 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
     return $R.report
 }
 
-function Get-SelfTestPdfProblem([string]$Work) {
-    # 준비의 자체 시험 결과(작업 폴더의 자체시험결과.json). PDF 가 통과했거나 파일이 없으면(준비 전 · 대표 PC) $null,
-    # 통과하지 못했으면 그때의 사유 글자. 파일을 읽지 못하면 PDF 를 막는 쪽으로(사유 = 읽지 못함).
+function Get-SelfTestProblem([string]$Work, [string]$Key) {
+    # 준비의 자체 시험 결과(작업 폴더의 자체시험결과.json)의 $Key(pdf_ok · excel_ok). 통과했거나 파일이 없으면(준비 전 · 대표 PC) $null,
+    # 통과하지 못했으면 그때의 사유 글자. 파일을 읽지 못하면 막는 쪽으로(사유 = 읽지 못함).
     $path = Join-Path $Work $script:SelfTestResultFile
     if (-not [IO.File]::Exists($path)) { return $null }
     try {
         $saved = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
-        $ok = $saved.PSObject.Properties['pdf_ok']
+        $ok = $saved.PSObject.Properties[$Key]
         if ($null -ne $ok -and $ok.Value -is [bool] -and $ok.Value) { return $null }
         $message = $saved.PSObject.Properties['message']
         if ($null -ne $message -and -not [string]::IsNullOrWhiteSpace([string]$message.Value)) { return [string]$message.Value }
-        return 'PDF 시험을 통과하지 못했습니다.'
+        return '자체 시험을 통과하지 못했습니다.'
     } catch {
         return "$($script:SelfTestResultFile) 를 읽지 못했습니다: $($_.Exception.Message)"
     }
@@ -501,6 +505,7 @@ function Get-UnmatchedFiles($Job, [string]$Work, [datetime]$Now) {
         $suffix = [IO.Path]::GetExtension($name).ToLowerInvariant()
         if ($script:UnmatchedSuffixes -notcontains $suffix -or $name.StartsWith('~$')) { continue }
         if ($suffix -eq '.pdf' -and -not $script:Run.pdf_ok) { continue }
+        if ($suffix -eq '.xlsx' -and $null -ne $script:Run.excel_self_test) { continue }
         try {
             if (($Now - [IO.File]::GetLastWriteTime($path)).TotalSeconds -le $script:UnmatchedSeconds) { continue }
             if (-not $known.Contains((Get-FileFingerprint $path))) { $found.Add($path) }
@@ -606,6 +611,7 @@ function Invoke-OneDocument([string]$Path) {
     }
     $isPdf = [IO.Path]::GetExtension($name).ToLowerInvariant() -eq '.pdf'
     if ($isPdf -and -not $R.pdf_ok) { $R.pdf_skipped++; return }   # 설계 6-4: 기록하지 않고 그대로 둔다(다음 실행 때 다시 봄)
+    if (-not $isPdf -and $null -ne $R.excel_self_test) { $R.excel_skipped++; return }   # 엑셀 자체 시험 실패: 같은 길
 
     $result = $null
     $source = $null
