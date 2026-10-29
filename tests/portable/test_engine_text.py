@@ -145,6 +145,20 @@ def test_row_pattern_anchored_at_start_only(line, table, run_engine):
     assert engine_view(out) == expected
 
 
+@pytest.mark.parametrize("body", ["", "\n   \n\n"], ids=["no_lines", "blank_lines"])
+def test_empty_table_is_empty_list(body, run_engine):
+    """시작 · 끝키워드 사이에 품목 줄이 없으면(빈 줄만 있어도) 표는 None 이 아니라 빈 목록 [] (지금 판과 같음)."""
+    rules = rules_from_text(QTY_RULES)
+    text = f"TEST DOC\nNo: A-1\nBEGIN\n{body}END"
+    expected = python_view(extract_from_text(text, rules))
+    assert expected["table"] == []
+
+    out = run_engine("extract_text", {"rules": rules_to_portable(rules), "text": text})
+
+    assert out["table"] == []
+    assert engine_view(out) == expected
+
+
 def test_no_type_and_missing_number(run_engine):
     """판별키워드가 없으면 판별 실패, 번호필드가 안 맞으면 번호필드 미추출 사유(글자까지 지금 판과 같음)."""
     rules = rules_from_text(QTY_RULES)
