@@ -18,6 +18,7 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'lib\Values.ps1')
 . (Join-Path $PSScriptRoot 'lib\Rules.ps1')
 . (Join-Path $PSScriptRoot 'lib\ExtractText.ps1')
+. (Join-Path $PSScriptRoot 'lib\ExtractGrid.ps1')
 
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 
@@ -35,6 +36,11 @@ $script:EngineOps = @{
         param($Payload)
         $rules = ConvertTo-PortableRules $Payload.rules
         ConvertTo-ResultJson (Get-TextExtract $rules ([string]$Payload.text))
+    }
+    'extract_grid' = {
+        param($Payload)
+        $rules = ConvertTo-PortableRules $Payload.rules
+        ConvertTo-ResultJson (Get-GridExtract $rules $Payload.grid)
     }
 }
 

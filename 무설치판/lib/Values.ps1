@@ -44,6 +44,9 @@ function ConvertTo-DateValue([string]$Value) {
 function ConvertTo-JsonValue($Value) {
     # 결과 JSON 표기: 금액은 자리 그대로의 글자("1234.50"), 날짜는 "YYYY-MM-DD", 나머지는 그대로.
     if ($Value -is [decimal]) { return $Value.ToString($script:Invariant) }
-    if ($Value -is [DateTime]) { return $Value.ToString('yyyy-MM-dd', $script:Invariant) }
+    if ($Value -is [DateTime]) {
+        if ($Value.TimeOfDay.Ticks -ne 0) { return $Value.ToString('yyyy-MM-ddTHH:mm:ss', $script:Invariant) }   # 시각이 있는 칸(엑셀 PO 의 서식 없는 칸)
+        return $Value.ToString('yyyy-MM-dd', $script:Invariant)
+    }
     return $Value
 }
