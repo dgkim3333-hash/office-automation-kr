@@ -20,6 +20,7 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'lib\ExtractText.ps1')
 . (Join-Path $PSScriptRoot 'lib\ExtractGrid.ps1')
 . (Join-Path $PSScriptRoot 'lib\Verify.ps1')
+. (Join-Path $PSScriptRoot 'lib\Markup.ps1')
 
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 
@@ -48,6 +49,11 @@ $script:EngineOps = @{
         param($Payload)
         $rules = ConvertTo-PortableRules $Payload.rules
         ConvertTo-ChecksJson (Get-Checks $Payload.result $Payload.source $rules)
+    }
+    'markup' = {
+        # 입력 {action, ...}: 마크업표 읽기 · 값 · 없는 파트 사유 · 검산 · 지문 · 쓴 값(Markup.ps1 의 Invoke-MarkupOp 주석 참고).
+        param($Payload)
+        Invoke-MarkupOp $Payload
     }
 }
 
