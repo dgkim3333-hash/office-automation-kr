@@ -131,9 +131,11 @@ function Remove-OfficeCopy($Copy) {
 
 # ---- 따로 돌리기 · 시간 제한 ---------------------------------------------------------------------
 
-function Invoke-OfficeWork([scriptblock]$Work, [string]$Path, [string]$ProcessName, [int]$TimeoutSec, [string]$TimeoutText, [string]$Label) {
-    # 오피스 일($Work, 매개변수 하나 = 복사본 경로)을 새 runspace 에서 돌리고 TimeoutSec 초까지 기다린다.
+function Invoke-OfficeWork([scriptblock]$Work, $Path, [string]$ProcessName, [int]$TimeoutSec, [string]$TimeoutText, [string]$Label,
+                           [string]$FailText = '{0}로 읽지 못함: {1}') {
+    # 오피스 일($Work, 매개변수 하나 = 복사본 경로. 쓰기 일(Writers.ps1)은 경로 대신 할 일을 담은 객체)을 새 runspace 에서 돌리고 TimeoutSec 초까지 기다린다.
     # 끝나면 그 결과를, 넘으면 이 실행이 띄운 오피스를 끝낸 뒤 TimeoutException 을 던진다. 어느 쪽이든 띄운 오피스는 남기지 않는다.
+    # 일 안의 오류는 FailText('{0}' = Label, '{1}' = 사유) 글자로 다시 던진다.
     $script:OfficeForced = 0
     $before = Get-OfficeProcesses $ProcessName -IdsOnly
     $runspace = [runspacefactory]::CreateRunspace()
@@ -177,7 +179,7 @@ function Invoke-OfficeWork([scriptblock]$Work, [string]$Path, [string]$ProcessNa
         $forced = Stop-OwnOffice $before $ProcessName $script:OfficeExitWaitSec
         $script:OfficeForced = $forced.Count
     }
-    if ($null -ne $failure) { throw ('{0}로 읽지 못함: {1}' -f $Label, $failure) }
+    if ($null -ne $failure) { throw ($FailText -f $Label, $failure) }
     if ($output.Count -eq 0) { throw ('{0}에서 아무것도 받지 못했습니다.' -f $Label) }
     return $output[0]
 }

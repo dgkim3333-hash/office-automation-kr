@@ -23,6 +23,7 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'lib\Markup.ps1')
 . (Join-Path $PSScriptRoot 'lib\Company.ps1')
 . (Join-Path $PSScriptRoot 'lib\Office.ps1')
+. (Join-Path $PSScriptRoot 'lib\Writers.ps1')
 
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 
@@ -66,6 +67,11 @@ $script:EngineOps = @{
         # 입력 {action, ...}: 오피스로 읽기 · 정규화 · 내 프로세스 고르기 · PDF 안내 설정(Office.ps1 의 Invoke-OfficeOp 주석 참고).
         param($Payload)
         Invoke-OfficeOp $Payload
+    }
+    'office_write' = {
+        # 입력 {action, ...}: 엑셀로 회사 양식 · 장부 · 검산 파일 쓰기 · 다시 읽기 · 잠김 확인(Writers.ps1 의 Invoke-WriterOp 주석 참고).
+        param($Payload)
+        Invoke-WriterOp $Payload
     }
 }
 
