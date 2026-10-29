@@ -23,3 +23,7 @@ dev = [
 testpaths = ["tests"]
 addopts = "-rf"  # 실패한 테스트 이름을 요약에 항상 찍는다
 pythonpath = ["."]
+markers = [
+    "office: 실제 워드 · 엑셀(오피스)이 있어야 도는 무설치판 시험",
+    "po_test_kit: C:\\PO시험 시험 자료가 있어야 도는 시험",
+]

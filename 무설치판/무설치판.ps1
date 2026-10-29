@@ -1,0 +1,65 @@
+﻿# 무설치판: Windows PowerShell 5.1 + 오피스만으로 PO 를 정리한다. 이 파일은 명령을 골라 lib\ 의 함수를 부르는 입구다.
+#
+# 쓰는 법: 무설치판.ps1 -Command <명령> [-Input <json>] [-Output <json>] [-Culture <문화권>]
+#   엔진  시험용 입구. 입력 JSON 의 op 로 엔진 함수를 고르고 결과 JSON 을 -Output 에 쓴다.
+#         오류면 {"error": "사유"} 를 쓰고 반환 코드 1.
+# -Culture 를 주면 그 문화권(예: de-DE)으로 스레드를 바꾼 뒤 돈다(문화권에 흔들리지 않는지 시험할 때).
+# ($Input 은 PowerShell 자동 변수라 이름을 InputPath · OutputPath 로 두고 -Input · -Output 은 별칭으로 받는다.)
+param(
+    [Parameter(Mandatory = $true)][string]$Command,
+    [Alias('Input')][string]$InputPath,
+    [Alias('Output')][string]$OutputPath,
+    [string]$Culture
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+
+. (Join-Path $PSScriptRoot 'lib\Values.ps1')
+. (Join-Path $PSScriptRoot 'lib\Rules.ps1')
+. (Join-Path $PSScriptRoot 'lib\ExtractText.ps1')
+
+$script:Utf8 = New-Object Text.UTF8Encoding($false)
+
+function Read-JsonFile([string]$Path) {
+    return [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8) | ConvertFrom-Json
+}
+
+function Write-JsonFile([string]$Path, [string]$Json) {
+    [IO.File]::WriteAllText($Path, $Json, $script:Utf8)
+}
+
+# 엔진 op: 입력 JSON(op 를 뺀 나머지 키)을 받아 결과 JSON 글자를 돌려준다. 뒤 작업이 op 를 여기에 더한다.
+$script:EngineOps = @{
+    'extract_text' = {
+        param($Payload)
+        $rules = ConvertTo-PortableRules $Payload.rules
+        ConvertTo-ResultJson (Get-TextExtract $rules ([string]$Payload.text))
+    }
+}
+
+# 명령: 뒤 작업이 실행 · 점검 · 준비 · 놓친실행 을 여기에 더한다.
+$script:Commands = @{
+    '엔진' = {
+        $payload = Read-JsonFile $InputPath
+        $op = [string]$payload.op
+        if (-not $script:EngineOps.ContainsKey($op)) { throw "엔진 op '$op' 는 없습니다." }
+        Write-JsonFile $OutputPath (& $script:EngineOps[$op] $payload)
+    }
+}
+
+try {
+    if ($Culture) {
+        $info = New-Object Globalization.CultureInfo($Culture)
+        [Threading.Thread]::CurrentThread.CurrentCulture = $info
+        [Threading.Thread]::CurrentThread.CurrentUICulture = $info
+    }
+    if (-not $script:Commands.ContainsKey($Command)) { throw "명령 '$Command' 는 없습니다." }
+    & $script:Commands[$Command]
+    exit 0
+} catch {
+    $message = $_.Exception.Message
+    if ($OutputPath) { Write-JsonFile $OutputPath (ConvertTo-Json -InputObject @{ error = $message }) }
+    [Console]::Error.WriteLine($message)
+    exit 1
+}
