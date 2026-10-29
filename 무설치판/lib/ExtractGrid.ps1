@@ -2,128 +2,14 @@
 # 격자: {"active": 활성 시트 번호(0부터, 없으면 0), "sheets": [{"name", "cells": [[행, 열, {"t", "v", "f"}], …]}]}
 #   t = n(숫자: 정수 · 소수) · s(글자) · b(참거짓) · d(날짜, v 는 "YYYY-MM-DDTHH:MM:SS"). 빈 칸은 없다. f(표시 형식)는 읽지 않는다.
 # 결과 객체는 ExtractText.ps1 의 New-ExtractResult 와 같다(form = 엑셀양식 이름, is_excel = $true).
-
-Add-Type -AssemblyName System.Numerics
+# ConvertTo-ExcelNumber(엑셀 숫자)는 Values.ps1 에 있다.
 
 $script:DetectRows = 20       # 판별키워드를 찾는 줄 수 (칸이 있는 줄만 센다)
 $script:ScanRows = 30         # 판별 줄을 모으는 행 수 (지금 판 max(DETECT_ROWS, HEAD_LINES))
-$script:ExcelDigits = 15      # 엑셀이 숫자를 보관 · 계산하는 유효 자리 수
 $script:RightOf = '오른쪽:'
 $script:ColumnStride = [long]20000   # 칸 열쇠 = 행 x 20000 + 열 (열은 20000 보다 작다)
 $script:NoForm = '판별 실패 (규칙.yaml 의 엑셀양식 중 맞는 고객이 없음. 05장대로 이 고객의 엑셀 양식을 가르치세요)'
 $script:CellAddress = [regex]'^([A-Z]{1,3})([1-9][0-9]*)$'
-$script:BigTwo = [System.Numerics.BigInteger]2
-$script:BigTen = [System.Numerics.BigInteger]10
-
-# ---- 숫자: 엑셀처럼 유효 15자리 ------------------------------------------------------------------
-
-function Get-DoubleFraction([double]$Value) {
-    # 0 보다 큰 double 을 정확한 분수 Num/Den 으로(Den 은 2 의 거듭제곱). 글자 변환의 어림 없이 비트에서 바로 뽑는다.
-    $bits = [BitConverter]::DoubleToInt64Bits($Value)
-    $exponent = [int](($bits -shr 52) -band 0x7FF)
-    $fraction = $bits -band [long]4503599627370495
-    if ($exponent -eq 0) {
-        $mantissa = $fraction
-        $power = -1074
-    } else {
-        $mantissa = $fraction + [long]4503599627370496
-        $power = $exponent - 1075
-    }
-    $num = [System.Numerics.BigInteger]$mantissa
-    if ($power -ge 0) {
-        return @{ Num = $num * [System.Numerics.BigInteger]::Pow($script:BigTwo, $power); Den = [System.Numerics.BigInteger]::One }
-    }
-    return @{ Num = $num; Den = [System.Numerics.BigInteger]::Pow($script:BigTwo, - $power) }
-}
-
-function Get-NearestDouble([System.Numerics.BigInteger]$Num, [System.Numerics.BigInteger]$Den) {
-    # 양수 Num/Den 에 가장 가까운 double(가운데면 짝수쪽)의 정확한 분수. 15자리 다음이 꼭 5 인 글자의 올림 · 내림은 double 의 실제 값으로 가려야 한다.
-    $low = [System.Numerics.BigInteger]::Pow($script:BigTwo, 52)
-    $high = [System.Numerics.BigInteger]::Pow($script:BigTwo, 53)
-    $shift = 52 - [int][Math]::Floor([System.Numerics.BigInteger]::Log($Num, 2) - [System.Numerics.BigInteger]::Log($Den, 2))
-    while ($true) {
-        if ($shift -ge 0) {
-            $n = $Num * [System.Numerics.BigInteger]::Pow($script:BigTwo, $shift)
-            $d = $Den
-        } else {
-            $n = $Num
-            $d = $Den * [System.Numerics.BigInteger]::Pow($script:BigTwo, - $shift)
-        }
-        $m = [System.Numerics.BigInteger]::Divide($n, $d)
-        if ($m -lt $low) { $shift++ } elseif ($m -ge $high) { $shift-- } else { break }
-    }
-    $compare = (($n - $m * $d) * $script:BigTwo).CompareTo($d)
-    if ($compare -gt 0 -or ($compare -eq 0 -and -not $m.IsEven)) { $m = $m + [System.Numerics.BigInteger]::One }
-    if ($shift -ge 0) {
-        return @{ Num = $m; Den = [System.Numerics.BigInteger]::Pow($script:BigTwo, $shift) }
-    }
-    return @{ Num = $m * [System.Numerics.BigInteger]::Pow($script:BigTwo, - $shift); Den = [System.Numerics.BigInteger]::One }
-}
-
-function Get-Digits15([System.Numerics.BigInteger]$Num, [System.Numerics.BigInteger]$Den) {
-    # 양수 Num/Den 을 유효 15자리로 반올림(꼭 반이면 짝수쪽)한 [decimal]. 지금 판 format(x, '.15g') 와 같다. decimal 에 못 담으면 $null.
-    $low = [System.Numerics.BigInteger]::Pow($script:BigTen, $script:ExcelDigits - 1)
-    $high = [System.Numerics.BigInteger]::Pow($script:BigTen, $script:ExcelDigits)
-    $k = ($script:ExcelDigits - 1) - ($Num.ToString().Length - $Den.ToString().Length)
-    while ($true) {
-        if ($k -ge 0) {
-            $n = $Num * [System.Numerics.BigInteger]::Pow($script:BigTen, $k)
-            $d = $Den
-        } else {
-            $n = $Num
-            $d = $Den * [System.Numerics.BigInteger]::Pow($script:BigTen, - $k)
-        }
-        $q = [System.Numerics.BigInteger]::Divide($n, $d)
-        if ($q -lt $low) { $k++ } elseif ($q -ge $high) { $k-- } else { break }
-    }
-    $compare = (($n - $q * $d) * $script:BigTwo).CompareTo($d)
-    if ($compare -gt 0 -or ($compare -eq 0 -and -not $q.IsEven)) { $q = $q + [System.Numerics.BigInteger]::One }
-    if ($k -gt 28) { return $null }   # decimal 은 소수 28자리까지
-    try {
-        return [decimal]::Parse("${q}E$(- $k)", [Globalization.NumberStyles]::Float, $script:Invariant)
-    } catch {
-        return $null
-    }
-}
-
-function Remove-TrailingZeros([decimal]$Value) {
-    # 소수 뒤의 0 을 뺀다(1.50 → 1.5, 100.0 → 100). 파이썬 '.15g' 글자와 같은 모양.
-    $text = $Value.ToString($script:Invariant)
-    if (-not $text.Contains('.')) { return $Value }
-    return [decimal]::Parse($text.TrimEnd('0').TrimEnd('.'), $script:Invariant)
-}
-
-function ConvertTo-ExcelNumber($Value) {
-    # 엑셀 칸의 숫자를 [decimal] 로(지금 판 excel_number). 정수는 그대로, 소수는 유효 15자리로 맞추고 뒤의 0 은 뺀다.
-    #   [double]  : 엑셀 Value2 그대로. 비트에서 정확한 분수를 뽑아 반올림한다.
-    #   [decimal] : JSON 에서 읽은 소수(5.1 의 ConvertFrom-Json 은 소수점이 있는 숫자를 decimal 로 줌). 적힌 글자가 파이썬 float 의
-    #               가장 짧은 글자이므로 15자리 이하면 그대로, 더 길면 가장 가까운 double 의 실제 값으로 반올림한다.
-    # 숫자가 아니거나 참거짓이면 $null.
-    if ($null -eq $Value -or $Value -is [bool]) { return $null }
-    if ($Value -is [int] -or $Value -is [long]) { return [decimal]$Value }
-    $negative = $false
-    if ($Value -is [double]) {
-        if ([double]::IsNaN($Value) -or [double]::IsInfinity($Value)) { return $null }
-        if ($Value -eq 0) { return [decimal]0 }
-        $negative = $Value -lt 0
-        $fraction = Get-DoubleFraction ([Math]::Abs($Value))
-    } elseif ($Value -is [decimal]) {
-        $negative = $Value -lt 0
-        $unsigned = [Math]::Abs($Value).ToString($script:Invariant)
-        $digits = $unsigned.Replace('.', '')
-        if ($digits.Trim('0').Length -le $script:ExcelDigits) { return Remove-TrailingZeros $Value }
-        $point = $unsigned.IndexOf('.')
-        $places = if ($point -lt 0) { 0 } else { $unsigned.Length - $point - 1 }
-        $fraction = Get-NearestDouble ([System.Numerics.BigInteger]::Parse($digits)) ([System.Numerics.BigInteger]::Pow($script:BigTen, $places))
-    } else {
-        return $null
-    }
-    $rounded = Get-Digits15 $fraction.Num $fraction.Den
-    if ($null -eq $rounded) { return $null }
-    $rounded = Remove-TrailingZeros $rounded
-    if ($negative) { return - $rounded }
-    return $rounded
-}
 
 # ---- 칸 값 -------------------------------------------------------------------------------------
 

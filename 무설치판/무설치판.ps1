@@ -19,6 +19,7 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'lib\Rules.ps1')
 . (Join-Path $PSScriptRoot 'lib\ExtractText.ps1')
 . (Join-Path $PSScriptRoot 'lib\ExtractGrid.ps1')
+. (Join-Path $PSScriptRoot 'lib\Verify.ps1')
 
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 
@@ -41,6 +42,12 @@ $script:EngineOps = @{
         param($Payload)
         $rules = ConvertTo-PortableRules $Payload.rules
         ConvertTo-ResultJson (Get-GridExtract $rules $Payload.grid)
+    }
+    'verify' = {
+        # 입력 {rules, result, source}: result 는 위 두 op 의 결과 객체, source 는 {kind: "text", text} 또는 {kind: "grid", grid}.
+        param($Payload)
+        $rules = ConvertTo-PortableRules $Payload.rules
+        ConvertTo-ChecksJson (Get-Checks $Payload.result $Payload.source $rules)
     }
 }
 
