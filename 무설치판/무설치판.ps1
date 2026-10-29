@@ -22,6 +22,7 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'lib\Verify.ps1')
 . (Join-Path $PSScriptRoot 'lib\Markup.ps1')
 . (Join-Path $PSScriptRoot 'lib\Company.ps1')
+. (Join-Path $PSScriptRoot 'lib\Office.ps1')
 
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 
@@ -60,6 +61,11 @@ $script:EngineOps = @{
         # 입력 {action, ...}: 회사 양식 줄 · 파일 이름 채우기 · 이름 충돌(Company.ps1 의 Invoke-CompanyOp 주석 참고).
         param($Payload)
         Invoke-CompanyOp $Payload
+    }
+    'office' = {
+        # 입력 {action, ...}: 오피스로 읽기 · 정규화 · 내 프로세스 고르기 · PDF 안내 설정(Office.ps1 의 Invoke-OfficeOp 주석 참고).
+        param($Payload)
+        Invoke-OfficeOp $Payload
     }
 }
 
