@@ -11,6 +11,7 @@ $script:XlsHint = '옛 엑셀(.xls) {0}개: 엑셀에서 열어 .xlsx 로 다시
 $script:MbIconInformation = 0x40
 $script:MbIconWarning = 0x30
 $script:MbTopmost = 0x40000
+$script:NoticeFile = $null   # 시험용: 이 경로가 있으면 알림을 띄우지 않고 그 파일에 적는다(Show-Notice)
 
 function Get-NoticeValue($Object, [string]$Name, $Default) {
     # 해시표 · PSCustomObject(JSON) 어느 쪽이든 값 하나. 없으면 기본값.
@@ -99,6 +100,12 @@ public static extern int MessageBoxW(IntPtr hWnd, string text, string caption, u
 
 function Show-Notice([string]$Title, [string]$Body, [string]$Folder, [int]$Icon = $script:MbIconInformation) {
     # 알림을 띄운다. 실패하면 메시지 창. 둘 다 실패해도 오류를 내지 않는다(실행 결과는 이미 기록됨).
+    if ($script:NoticeFile) {
+        # 시험용(-TestHooks 의 notice_file): 띄우지 않고 {title, body, folder} 를 한 줄 JSON 으로 덧붙인다
+        $line = ConvertTo-Json -InputObject ([ordered]@{ title = $Title; body = $Body; folder = $Folder }) -Depth 20 -Compress
+        [IO.File]::AppendAllText($script:NoticeFile, $line + "`n", (New-Object Text.UTF8Encoding($false)))
+        return
+    }
     try { Show-Toast $Title $Body $Folder; return } catch { }
     try { Show-MessageBox $Title $Body $Icon } catch { }
 }

@@ -41,6 +41,13 @@ $script:RemakeHint = '그러면 내일 실행 때(또는 규칙.yaml 을 고친 
 $script:FailPrefix = '중요: {0} 작업을 실행하지 못했습니다(아무 파일도 처리하지 않음).'
 # 설계 6-4: 워드의 「PDF 를 편집 가능한 문서로 변환합니다」 안내가 켜져 있으면 PDF 를 열지 않는다(설정은 바꾸지 않음)
 $script:PdfWarningAlert = "워드의 PDF 변환 안내가 켜져 있어 PDF {0}개를 처리하지 않았습니다(입력 폴더에 그대로 두었고, 안내를 끈 뒤 다음 실행 때 처리합니다). 워드에서 PDF 를 한 번 열고 '이 메시지를 다시 표시 안 함'에 체크하세요."
+# 준비(작업 10)의 자체 시험에서 PDF 가 정답과 달랐으면 작업 폴더의 자체시험결과.json 에 pdf_ok = false 가 남는다. 그동안 PDF 는 위 안내와 같은 길로 둔다
+$script:SelfTestResultFile = '자체시험결과.json'
+$script:SelfTestPdfAlert = '준비 때 자체 시험에서 PDF 를 통과하지 못해 PDF {0}개를 처리하지 않았습니다(입력 폴더에 그대로 두었습니다). 준비.bat 을 다시 두 번 클릭해도 그대로면 대표에게 알려 주세요. 자체 시험: '
+# 자동 실행 · 놓친 실행이 잠긴 작업을 만나면 이 간격(초)으로 이 시간(초)까지 다시 해 본다(지금 판 schedule.retry_locked). 시험에서만 줄인다
+$script:LockRetrySeconds = 30
+$script:LockRetryLimitSeconds = 15 * 60
+$script:AutoFixHint = '대표에게 알려 주세요(작업 설정이 깨졌으면 고친 묶음을 받아 준비.bat 을 다시 두 번 클릭합니다).'
 
 # 시험용으로만 바꾸는 값(-WordTimeoutSec · -TestPdfWarningOff). $null 이면 보통 값.
 $script:RunWordTimeoutSec = $null
@@ -242,10 +249,17 @@ function Read-JobSettings([string]$Folder) {
 }
 
 function Save-JobLastRun($Job, [string]$Today) {
-    # 작업설정.json 의 last_run 만 바꿔 저장한다(모르는 키는 그대로). 임시 파일에 쓴 뒤 바꾼다.
+    # 작업설정.json 의 last_run 만 바꿔 저장한다(모르는 키는 그대로).
+    Save-JobSettingsValues $Job ([ordered]@{ last_run = $Today })
+}
+
+function Save-JobSettingsValues($Job, $Values) {
+    # 작업설정.json 의 주어진 키만 바꿔 저장한다(모르는 키는 그대로). 임시 파일에 쓴 뒤 바꾼다.
     $settings = $Job.settings
-    if ($null -eq $settings.PSObject.Properties['last_run']) { $settings | Add-Member -NotePropertyName last_run -NotePropertyValue $Today }
-    else { $settings.last_run = $Today }
+    foreach ($key in $Values.Keys) {
+        if ($null -eq $settings.PSObject.Properties[$key]) { $settings | Add-Member -NotePropertyName $key -NotePropertyValue $Values[$key] }
+        else { $settings.$key = $Values[$key] }
+    }
     $path = Join-Path $Job.folder $script:SettingsFile
     $tmp = $path + '.tmp'
     [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $settings -Depth 20), $script:RunUtf8)
@@ -336,7 +350,7 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
         source = $Job.input_dir; report = (New-RunReport); warnings = (New-Object System.Collections.Generic.List[string])
         stop_reason = ''; ledger_locked = $false; ledger_held = 0; ledger_stop = $null
         markup_used = $false; markup_bytes = $null; markup_read_error = ''; markup_table = $null; markup_fp = ''
-        pdf_skipped = 0; pdf_ok = $true
+        pdf_skipped = 0; pdf_ok = $true; pdf_self_test = $null
     }
     $R = $script:Run
     $stop = Get-PreflightProblem $Job
@@ -375,7 +389,10 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
     foreach ($row in $R.state.Values) {
         if ((Get-RecordValue $row '상태') -eq '성공') { [void]$R.success_keys.Add((Get-RecordValue $row '문서종류') + "`0" + (Get-RecordValue $row '번호')) }
     }
-    if ($null -ne $script:RunPdfWarningOff) { $R.pdf_ok = [bool]$script:RunPdfWarningOff } else { $R.pdf_ok = Test-PdfWarningOff }
+    $R.pdf_self_test = Get-SelfTestPdfProblem $Work
+    if ($null -ne $R.pdf_self_test) { $R.pdf_ok = $false }
+    elseif ($null -ne $script:RunPdfWarningOff) { $R.pdf_ok = [bool]$script:RunPdfWarningOff }
+    else { $R.pdf_ok = Test-PdfWarningOff }
 
     $candidates = @()
     try {
@@ -390,7 +407,10 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
         $R.stop_reason = $_.Exception.Message
         $R.report.stopped = $true
     }
-    if ($R.pdf_skipped -gt 0) { $R.report.alerts.Add(($script:PdfWarningAlert -f $R.pdf_skipped)) }
+    if ($R.pdf_skipped -gt 0) {
+        if ($null -ne $R.pdf_self_test) { $R.report.alerts.Add(($script:SelfTestPdfAlert -f $R.pdf_skipped) + $R.pdf_self_test) }
+        else { $R.report.alerts.Add(($script:PdfWarningAlert -f $R.pdf_skipped)) }
+    }
 
     try {
         Save-JobLastRun $Job $R.today
@@ -408,6 +428,23 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
     $R.report.message = Get-RunMessage
     $R.report.has_news = Test-ReportNews $R.report
     return $R.report
+}
+
+function Get-SelfTestPdfProblem([string]$Work) {
+    # 준비의 자체 시험 결과(작업 폴더의 자체시험결과.json). PDF 가 통과했거나 파일이 없으면(준비 전 · 대표 PC) $null,
+    # 통과하지 못했으면 그때의 사유 글자. 파일을 읽지 못하면 PDF 를 막는 쪽으로(사유 = 읽지 못함).
+    $path = Join-Path $Work $script:SelfTestResultFile
+    if (-not [IO.File]::Exists($path)) { return $null }
+    try {
+        $saved = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        $ok = $saved.PSObject.Properties['pdf_ok']
+        if ($null -ne $ok -and $ok.Value -is [bool] -and $ok.Value) { return $null }
+        $message = $saved.PSObject.Properties['message']
+        if ($null -ne $message -and -not [string]::IsNullOrWhiteSpace([string]$message.Value)) { return [string]$message.Value }
+        return 'PDF 시험을 통과하지 못했습니다.'
+    } catch {
+        return "$($script:SelfTestResultFile) 를 읽지 못했습니다: $($_.Exception.Message)"
+    }
 }
 
 function Get-PreflightProblem($Job) {
@@ -892,28 +929,69 @@ function Add-RunRecordText([string]$Folder, [string]$Label, [string]$Message) {
     }
 }
 
-function Invoke-RunCommand([string]$Work, [int]$Number, [datetime]$Now, [string]$Label, [bool]$NoNotify, [string]$OutputPath) {
+function Test-JobLocked($ErrorRecord) {
+    $e = $ErrorRecord.Exception
+    return ($null -ne $e -and $null -ne $e.Data -and $e.Data.Contains('job_locked'))
+}
+
+function Invoke-WithLockRetry([scriptblock]$Call) {
+    # 지금 판 schedule.retry_locked: $Call 이 잠김(job_locked)으로 실패하면 LockRetrySeconds 마다 LockRetryLimitSeconds 까지 다시 해 본다.
+    # 그래도 잠겨 있으면 마지막 오류를 그대로 던진다(부른 쪽이 기록하고 알린다). 다른 오류는 바로 던진다.
+    $waited = 0
+    while ($true) {
+        try {
+            return (& $Call)
+        } catch {
+            if (-not (Test-JobLocked $_) -or $waited -ge $script:LockRetryLimitSeconds) { throw }
+        }
+        Start-Sleep -Seconds $script:LockRetrySeconds
+        $waited += $script:LockRetrySeconds
+    }
+}
+
+function Get-LockedText([string]$Folder) {
+    # 지금 판 __main__._locked_text: 끝내 잠겨 있어 자동 실행 · 놓친 실행을 못 했을 때의 글자.
+    $title = [IO.Path]::GetFileName($Folder)
+    try { $title = (Read-JobSettings $Folder).title } catch { }
+    return ("{0} 작업이 다른 일로 잠겨 있어 오늘 자동 실행을 못 했습니다. 지금 실행을 눌러 주세요(바탕화면 「지금 실행 - {0}」)." -f $title)
+}
+
+function Send-AutoFailure([string]$LogDir, [string]$What, [string]$Message, [string]$RecordLabel, [bool]$NoNotify) {
+    # 지금 판 _auto_failed: 아무도 화면을 안 보는 자동 실행 · 놓친 실행의 실패를 실행기록.txt 에 남기고 알린다(알림 글에 기록 위치, 누르면 그 폴더).
+    Add-RunRecordText $LogDir $RecordLabel $Message
+    if (-not $NoNotify) { Send-FailureNotice $What ("$Message`n기록: " + (Join-Path $LogDir $script:RunRecordFile)) $LogDir }
+}
+
+function Invoke-RunCommand([string]$Work, [int]$Number, [datetime]$Now, [string]$Label, [bool]$NoNotify, [string]$OutputPath, [bool]$Auto = $false) {
     # -Command 실행: 작업 하나를 실행 → 화면 · 실행기록.txt 에 요약 → 알릴 것이 있으면 알림 → 반환 코드.
     #   반환 코드: 0 정상(확인필요 · 보류가 있어도) · 1 멈춤(시작 못함 · 처리기록을 쓰지 못함) · 2 같은 작업이 실행 중 · 3 그 밖의 오류(작업 없음 등)
+    # $Auto(매일 자동 실행, 지금 판 run --자동): 잠겨 있으면 기다렸다 다시 해 보고(Invoke-WithLockRetry), 끝내 실패하면(2 · 3)
+    #   실행기록에 남기고 실패 알림을 띄운다(아무도 화면을 안 보므로). 「지금 실행」 은 기다리지 않고 알리지도 않는다(화면에 보임).
+    $what = '작업 {0:D2} 자동 실행' -f $Number
     $folder = $null
     try {
         $folder = Find-PortableJob $Work $Number
     } catch {
-        [Console]::Out.WriteLine($_.Exception.Message)   # 작업이 없음(지금 판 JobError 처럼 그 글자만)
+        $message = $_.Exception.Message
+        [Console]::Out.WriteLine($message)   # 작업이 없음(지금 판 JobError 처럼 그 글자만)
+        if ($Auto) { Send-AutoFailure $Work $what "$message`n$($script:AutoFixHint)" "$Label 실패" $NoNotify }
         if ($OutputPath) {
-            [IO.File]::WriteAllText($OutputPath, (ConvertTo-Json -InputObject ([ordered]@{ error = $_.Exception.Message; locked = $false }) -Depth 20), $script:RunUtf8)
+            [IO.File]::WriteAllText($OutputPath, (ConvertTo-Json -InputObject ([ordered]@{ error = $message; locked = $false }) -Depth 20), $script:RunUtf8)
         }
         return 3
     }
     try {
-        $report = Invoke-PortableJob $Work $Number $Now
+        if ($Auto) { $report = Invoke-WithLockRetry { Invoke-PortableJob $Work $Number $Now } }
+        else { $report = Invoke-PortableJob $Work $Number $Now }
     } catch {
-        $locked = ($null -ne $_.Exception.Data -and $_.Exception.Data.Contains('job_locked'))
+        $locked = Test-JobLocked $_
         $message = $_.Exception.Message
         if (-not $locked) { $message = "예상하지 못한 오류로 멈췄습니다: $message" }
+        elseif ($Auto) { $message = Get-LockedText $folder }
         $code = if ($locked) { 2 } else { 3 }
         [Console]::Out.WriteLine($message)
-        if ($null -ne $folder) { Add-RunRecordText $folder "$Label 실패" $message }
+        if ($Auto) { Send-AutoFailure $folder $what $message "$Label 실패" $NoNotify }
+        else { Add-RunRecordText $folder "$Label 실패" $message }
         if ($OutputPath) {
             [IO.File]::WriteAllText($OutputPath, (ConvertTo-Json -InputObject ([ordered]@{ error = $message; locked = $locked }) -Depth 20), $script:RunUtf8)
         }

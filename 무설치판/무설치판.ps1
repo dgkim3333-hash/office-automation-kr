@@ -9,6 +9,13 @@
 #         0 정상 · 1 멈춤(시작 못함 · 처리기록을 못 씀) · 2 같은 작업이 실행 중 · 3 그 밖의 오류(작업 없음 등).
 #         (시간 제한으로 버려 둔 오피스 runspace 가 남아 있어도 프로세스가 끝나게 Exit 로 끝낸다.)
 #         시험용: -NoNotify(알림 끔) · -WordTimeoutSec <초>(워드 시간 제한) · -TestPdfWarningOff 0|1(PDF 안내 설정 확인 결과 대신)
+#         -Auto(작업 스케줄러가 부름): 잠겨 있으면 기다렸다 다시 해 보고, 끝내 실패하면(2 · 3) 실행기록에 남기고 실패 알림.
+#   준비  [-Bundle <묶음폴더>] [-Work <작업폴더>] [-NoDialog]  준비.bat 의 몸통(lib\Setup.ps1 의 Invoke-Setup). 묶음 = 이 스크립트 폴더의 위,
+#         작업 폴더 = 묶음. 반환 코드 0 끝남 · 1 멈춤(또는 일부 못 함).
+#   놓친실행  [-Work <작업폴더>] [-Now …] [-Output <json>] [-NoNotify]  시작프로그램 바로가기가 부름(오늘 시각이 지났는데 안 돈 작업).
+#   점검  -File <PDF 또는 xlsx> -Rules <규칙.json>  대표 PC 에서 무설치판으로 읽은 결과 표(지금 판 check 와 같은 표)를 콘솔에 찍는다.
+#   -TestHooks <json>: 시험용 끼우기(진짜 예약 작업 · 바탕화면 · 알림 · 폴더 고르기 창을 쓰지 않게). 열쇠:
+#         schedule ok|fail · desktop · startup_dir · pick [폴더…] · self_test pass|pdf_fail|excel_fail · notice_file · lock_retry [간격, 한도]
 # -Culture 를 주면 그 문화권(예: de-DE)으로 스레드를 바꾼 뒤 돈다(문화권에 흔들리지 않는지 시험할 때).
 # ($Input 은 PowerShell 자동 변수라 이름을 InputPath · OutputPath 로 두고 -Input · -Output 은 별칭으로 받는다.)
 param(
@@ -22,7 +29,12 @@ param(
     [switch]$Auto,
     [switch]$NoNotify,
     [int]$WordTimeoutSec = -1,
-    [string]$TestPdfWarningOff
+    [string]$TestPdfWarningOff,
+    [string]$File,
+    [string]$Rules,
+    [string]$Bundle,
+    [switch]$NoDialog,
+    [string]$TestHooks
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +51,7 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'lib\Writers.ps1')
 . (Join-Path $PSScriptRoot 'lib\Notify.ps1')
 . (Join-Path $PSScriptRoot 'lib\Run.ps1')
+. (Join-Path $PSScriptRoot 'lib\Setup.ps1')
 
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 
@@ -93,9 +106,41 @@ $script:EngineOps = @{
         param($Payload)
         Invoke-NotifyOp $Payload
     }
+    'setup' = {
+        # 입력 {action, ...}: 예약(가짜 등록) · 바로가기 · 자체 시험(Setup.ps1 의 Invoke-SetupOp 주석 참고).
+        param($Payload)
+        Invoke-SetupOp $Payload
+    }
 }
 
-# 명령: 뒤 작업이 실행 · 점검 · 준비 · 놓친실행 을 여기에 더한다.
+function Get-HookValue([string]$Name) {
+    if ($null -eq $script:Hooks) { return $null }
+    $p = $script:Hooks.PSObject.Properties[$Name]
+    if ($null -eq $p) { return $null }
+    return $p.Value
+}
+
+function Get-DefaultBundle {
+    if ($Bundle) { return $Bundle }
+    return (Split-Path -Parent $PSScriptRoot)
+}
+
+function Get-NowArgument {
+    if ($Now) { return [datetime]::ParseExact($Now, 'yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+    return [datetime]::MinValue
+}
+
+# 시험용 끼우기(-TestHooks). 운영(준비.bat · 바로가기 · 작업 스케줄러)에서는 쓰지 않는다.
+$script:Hooks = $null
+if ($TestHooks) {
+    $script:Hooks = Read-JsonFile $TestHooks
+    if (Get-HookValue 'notice_file') { $script:NoticeFile = [string](Get-HookValue 'notice_file') }
+    $retry = Get-HookValue 'lock_retry'
+    if ($null -ne $retry) { $script:LockRetrySeconds = [int]$retry[0]; $script:LockRetryLimitSeconds = [int]$retry[1] }
+}
+if ($TestPdfWarningOff) { $script:RunPdfWarningOff = ($TestPdfWarningOff -eq '1') }
+
+# 명령: 엔진 · 실행 · 놓친실행 · 준비 · 점검.
 $script:Commands = @{
     '엔진' = {
         $payload = Read-JsonFile $InputPath
@@ -107,12 +152,50 @@ $script:Commands = @{
         if ($Job -le 0) { throw '작업 번호(-Job NN)를 주세요.' }
         $workFolder = $Work
         if ([string]::IsNullOrEmpty($workFolder)) { $workFolder = Split-Path -Parent $PSScriptRoot }
-        $when = [datetime]::MinValue
-        if ($Now) { $when = [datetime]::ParseExact($Now, 'yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+        $when = Get-NowArgument
         if ($WordTimeoutSec -ge 0) { $script:RunWordTimeoutSec = $WordTimeoutSec }
-        if ($TestPdfWarningOff) { $script:RunPdfWarningOff = ($TestPdfWarningOff -eq '1') }
         $label = if ($Auto) { '자동 실행' } else { '지금 실행' }
-        $code = Invoke-RunCommand $workFolder $Job $when $label ([bool]$NoNotify) $OutputPath
+        $code = Invoke-RunCommand $workFolder $Job $when $label ([bool]$NoNotify) $OutputPath ([bool]$Auto)
+        [Console]::Out.Flush()
+        [Environment]::Exit($code)
+    }
+    '놓친실행' = {
+        $workFolder = $Work
+        if ([string]::IsNullOrEmpty($workFolder)) { $workFolder = Split-Path -Parent $PSScriptRoot }
+        $code = Invoke-CatchupCommand $workFolder (Get-NowArgument) ([bool]$NoNotify) $OutputPath
+        [Console]::Out.Flush()
+        [Environment]::Exit($code)
+    }
+    '준비' = {
+        $bundleFolder = Get-DefaultBundle
+        $workFolder = $Work
+        if ([string]::IsNullOrEmpty($workFolder)) { $workFolder = $bundleFolder }
+        $options = @{ BundleDir = $bundleFolder; Work = $workFolder; NoDialog = [bool]$NoDialog }
+        if ($null -ne $script:Hooks) {
+            # 시험: 진짜 작업 스케줄러 · 바탕화면 · 시작프로그램 · 폴더 고르기 창을 쓰지 않는다(빠진 열쇠가 있으면 멈춤)
+            foreach ($key in @('desktop', 'startup_dir')) { if (-not (Get-HookValue $key)) { throw "시험용 끼우기에 $key 가 없습니다." } }
+            $options.Desktop = [string](Get-HookValue 'desktop')
+            $options.StartupDir = [string](Get-HookValue 'startup_dir')
+            if ([string](Get-HookValue 'schedule') -ceq 'ok') { $options.RegisterTask = { param($Text, $TaskPath, $TaskName) $true } }
+            else { $options.RegisterTask = { param($Text, $TaskPath, $TaskName) throw '시험: 작업 스케줄러 막힘' } }
+            $queue = New-Object 'System.Collections.Generic.Queue[string]'
+            foreach ($folder in @(Get-HookValue 'pick')) { if ($null -ne $folder) { $queue.Enqueue([string]$folder) } }
+            $options.FolderPicker = { param($Prompt) if ($queue.Count -gt 0) { $queue.Dequeue() } else { '' } }.GetNewClosure()
+            $fixed = [string](Get-HookValue 'self_test')
+            if ($fixed) {
+                $result = [ordered]@{ ok = ($fixed -eq 'pass'); pdf_ok = ($fixed -ne 'pdf_fail'); excel_ok = ($fixed -ne 'excel_fail'); message = ''; detail = '' }
+                if ($fixed -eq 'pdf_fail') { $result.message = $script:PdfDifferent }
+                if ($fixed -eq 'excel_fail') { $result.message = $script:ExcelDifferent }
+                $options.SelfTest = { param($BundleDir) $result }.GetNewClosure()
+            }
+        }
+        $code = Invoke-Setup @options
+        [Console]::Out.Flush()
+        [Environment]::Exit($code)
+    }
+    '점검' = {
+        if (-not $File -or -not $Rules) { throw '점검할 파일(-File)과 규칙.json(-Rules)을 주세요.' }
+        $code = Invoke-CheckCommand $File $Rules
         [Console]::Out.Flush()
         [Environment]::Exit($code)
     }
