@@ -14,6 +14,7 @@
   uv run python -m app check FILE [--작업 N]      그 작업 규칙으로 추출 · 검산 결과 표만 보기(아무것도 바꾸지 않음)
   uv run python -m app pick-folder "안내 글"      폴더 고르기 창. 고른 경로를 마지막 줄에 출력
   uv run --extra outlook python -m app outlook N  (선택) Outlook '자동화' 폴더 첨부 → 그 작업의 입력 폴더
+  uv run python -m app export-portable N --out FILE   작업 규칙을 무설치판용 JSON 으로 내보내기(대표 PC 전용)
 """
 import argparse
 import os
@@ -41,6 +42,7 @@ from app.master import MasterError, load_master, lookup
 from app.organize import free_name
 from app.outlook import collect_from_outlook
 from app.outputs import _mark, company_form_name, company_rows
+from app.portable import export_rules, job_number_from
 from app.rules import RuleError, load_rules
 from app.verify import failed, verify
 
@@ -97,6 +99,10 @@ def _parser():
     f.add_argument("title", nargs="?", default="폴더를 고르세요", help="창에 보일 안내 글")
 
     sub.add_parser("outlook", help="(선택) Outlook 첨부 → 작업 입력 폴더").add_argument("job", help="작업 번호 또는 이름")
+
+    e = sub.add_parser("export-portable", help="작업 규칙을 무설치판용 JSON 으로 내보내기")
+    e.add_argument("job", help="작업 번호")
+    e.add_argument("--out", dest="out", required=True, help="만들 JSON 파일 경로")
     return p
 
 
@@ -149,6 +155,10 @@ def _dispatch(args, repo_root) -> int:
             return _finish(job, approve(job, work), "승인")
         if args.command == "check":
             return _check(work, args)
+        if args.command == "export-portable":
+            out = export_rules(job_number_from(args.job), _abs(args.out), work)
+            print(f"무설치판 규칙을 내보냈습니다: {out}")
+            return 0
         if args.command == "outlook":
             collect_from_outlook(find_job(work, args.job).input_dir)
             return 0
