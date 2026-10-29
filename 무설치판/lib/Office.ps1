@@ -108,8 +108,15 @@ function New-OfficeCopy([string]$Path, [string]$Job) {
     $folder = Join-Path $base ('무설치판_{0}_{1}_{2}' -f $safe, (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture), $random)
     [void][IO.Directory]::CreateDirectory($folder)
     $copy = Join-Path $folder ([IO.Path]::GetFileName($source))
-    [IO.File]::Copy($source, $copy)
-    Unblock-File -LiteralPath $copy
+    try {
+        [IO.File]::Copy($source, $copy)
+        Unblock-File -LiteralPath $copy -ErrorAction Stop
+    } catch {
+        # 복사가 실패하면 방금 만든 폴더를 지우고 오류를 그대로 다시 던진다
+        $failure = $_
+        Remove-OfficeCopy @{ Folder = $folder; Path = $copy }
+        throw $failure
+    }
     return @{ Folder = $folder; Path = $copy }
 }
 
@@ -240,9 +247,15 @@ $script:WordWork = {
             }
             $blocks.Add(@{ kind = 'p'; text = [string]$range.Text; list = [string]$range.ListFormat.ListString })
         }
-        [pscustomobject]@{ pages = $pages; blocks = $blocks.ToArray() }
+        # 다 읽은 뒤 여기서 닫는다. 닫기가 실패하면 그 사유를 결과에 남긴다(버리면 Quit 이 저장 확인에 막혀도 모른다)
+        $closeError = $null
+        # Close(SaveChanges) 의 인수는 ref 라 [ref] 로 넘긴다(Close(0) 도 이 PC 에서는 됐지만 Quit(0) 은 같은 이유로 실패함)
+        try { $doc.Saved = $true; $doc.Close([ref]0) } catch { $closeError = $_.Exception.Message }   # 0 = wdDoNotSaveChanges
+        if ($null -eq $closeError) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc); $doc = $null }
+        [pscustomobject]@{ pages = $pages; blocks = $blocks.ToArray(); closeError = $closeError }
     } finally {
-        if ($null -ne $doc) { try { $doc.Close(0) } catch { } ; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc) }
+        # 여기까지 문서가 남아 있으면(읽다가 오류 · 닫기 실패) 한 번 더 닫아 본다
+        if ($null -ne $doc) { try { $doc.Close([ref]0) } catch { } ; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc) }
         if ($null -ne $word) { try { $word.Quit() } catch { } ; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word) }
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
@@ -313,7 +326,7 @@ function ConvertTo-WordText($Blocks) {
 }
 
 function Read-WordText([string]$Path, [int]$TimeoutSec = $script:OfficeTimeoutSec, [string]$Job = '워드', [scriptblock]$Work = $script:WordWork) {
-    # 워드로 PDF(또는 워드 문서)를 읽어 정규화한 글자와 쪽 수: @{ text; pages }. 시간 제한을 넘으면 TimeoutException(워드가 응답하지 않음).
+    # 워드로 PDF(또는 워드 문서)를 읽어 정규화한 글자와 쪽 수: @{ text; pages; close_error }(close_error = 문서 닫기 실패 사유, 정상 $null). 시간 제한을 넘으면 TimeoutException(워드가 응답하지 않음).
     # $Work 는 시험에서 멈춘 워드를 흉내 낼 때만 바꾼다.
     $copy = New-OfficeCopy $Path $Job
     try {
@@ -321,7 +334,9 @@ function Read-WordText([string]$Path, [int]$TimeoutSec = $script:OfficeTimeoutSe
     } finally {
         Remove-OfficeCopy $copy
     }
-    return @{ text = (ConvertTo-WordText $raw.blocks); pages = [int]$raw.pages }
+    $closeError = $null
+    if ($null -ne $raw.PSObject.Properties['closeError']) { $closeError = $raw.closeError }
+    return @{ text = (ConvertTo-WordText $raw.blocks); pages = [int]$raw.pages; close_error = $closeError }
 }
 
 # ---- 엑셀 ---------------------------------------------------------------------------------------
@@ -461,7 +476,7 @@ function Invoke-OfficeOp($Payload) {
     # 엔진 op 'office'(시험용 입구). action:
     #   select_pids     {before, after: [{pid, commandline}]}  → [pid, ...]
     #   normalize_word  {blocks}                               → {text}
-    #   read_word       {path, timeout?}                       → {text, pages, forced}
+    #   read_word       {path, timeout?}                       → {text, pages, close_error, forced}
     #   read_excel      {path, timeout?}                       → {grid, forced}   (forced = Quit 뒤 강제로 끝낸 오피스 수)
     #   pdf_warning_off {}                                     → {off}
     #   excel_markup    {path, timeout?}                       → 엑셀로 읽은 격자(메모리 그대로)로 마크업표 읽기(markup op 의 read 와 같은 출력)
@@ -480,7 +495,7 @@ function Invoke-OfficeOp($Payload) {
         'normalize_word' { return ConvertTo-Json -InputObject @{ text = (ConvertTo-WordText $Payload.blocks) } -Depth 20 -Compress }
         'read_word' {
             $read = Read-WordText ([string]$Payload.path) $timeout
-            return ConvertTo-Json -InputObject @{ text = $read.text; pages = $read.pages; forced = $script:OfficeForced } -Depth 20 -Compress
+            return ConvertTo-Json -InputObject @{ text = $read.text; pages = $read.pages; close_error = $read.close_error; forced = $script:OfficeForced } -Depth 20 -Compress
         }
         'read_excel' {
             $grid = Read-ExcelGrid ([string]$Payload.path) $timeout
@@ -500,6 +515,10 @@ function Invoke-OfficeOp($Payload) {
             return ConvertTo-Json -InputObject @{ folder = $copy.Folder; path = $copy.Path } -Depth 20 -Compress
         }
         'stop_own' {
+            # 시험용이라도 아무 프로세스나 끝내지 못하게 이름을 제한한다(powershell.exe 는 가짜 프로세스 시험용)
+            if (@('WINWORD.EXE', 'EXCEL.EXE', 'powershell.exe') -notcontains [string]$Payload.name) {
+                throw "끝낼 수 없는 프로세스 이름: $($Payload.name)"
+            }
             $forced = Stop-OwnOffice @($Payload.before) ([string]$Payload.name) ([int]$Payload.grace)
             return ConvertTo-Json -InputObject @{ forced = $forced } -Depth 20 -Compress
         }

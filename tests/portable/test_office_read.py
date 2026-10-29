@@ -14,9 +14,10 @@ import openpyxl
 import pytest
 
 try:
+    import msvcrt
     import winreg
 except ImportError:   # Windows 가 아닌 곳(클라우드 등)에서는 오피스 시험을 건너뜀
-    winreg = None
+    msvcrt = winreg = None
 
 from app import extract
 from app.extract import extract_from_text
@@ -98,8 +99,9 @@ def kit_rules():
 
 
 def read_word(run_engine, path, timeout=READ_TIMEOUT) -> dict:
-    """{text, pages}. 워드가 Quit 뒤 스스로 끝났는지(강제로 끝낸 것 0개)도 본다."""
+    """{text, pages}. 문서를 오류 없이 닫았는지, 워드가 Quit 뒤 스스로 끝났는지(강제로 끝낸 것 0개)도 본다."""
     out = run_engine("office", {"action": "read_word", "path": str(path), "timeout": timeout})
+    assert out.pop("close_error") is None, "워드 문서 닫기가 실패함"
     assert out.pop("forced") == 0, "Quit 한 워드가 스스로 끝나지 않아 강제로 끝냄"
     return out
 
@@ -223,6 +225,33 @@ def test_office_opens_the_copy(app, tmp_path, temp_dir, run_engine):
     assert given != original and given.name == original.name
     assert given.parent.parent == temp_dir and given.parent.name.startswith("무설치판_")
     assert own_temp(temp_dir) == []
+
+
+def test_new_copy_failure_leaves_no_folder(tmp_path, temp_dir, run_engine):
+    """복사가 실패하면(없는 파일 · 다른 프로그램이 잠근 파일) 오류를 내고 만든 임시 폴더는 남기지 않는다."""
+    with pytest.raises(EngineError):
+        run_engine("office", {"action": "new_copy", "path": str(tmp_path / "없음.pdf"), "job": "01"})
+    assert own_temp(temp_dir) == []
+
+    locked = tmp_path / "잠김.pdf"
+    locked.write_bytes(b"%PDF-1.4 " + b"x" * 1000)
+    with open(locked, "rb") as f:
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1000)   # 읽기를 막는 잠금(복사가 도중에 실패)
+        try:
+            with pytest.raises(EngineError):
+                run_engine("office", {"action": "new_copy", "path": str(locked), "job": "01"})
+        finally:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1000)
+    assert own_temp(temp_dir) == []
+
+
+def test_stop_own_refuses_other_names(run_engine):
+    """시험용 stop_own 은 워드 · 엑셀(과 시험용 powershell.exe) 이름만 받는다."""
+    for name in ("notepad.exe", "explorer.exe", "WINWORD"):
+        with pytest.raises(EngineError) as error:
+            run_engine("office", {"action": "stop_own", "name": name, "before": [], "grace": 0})
+        assert "끝낼 수 없는 프로세스 이름" in str(error.value)
 
 
 def _powershell_pids() -> list[dict]:
