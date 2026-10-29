@@ -15,6 +15,7 @@
   uv run python -m app pick-folder "안내 글"      폴더 고르기 창. 고른 경로를 마지막 줄에 출력
   uv run --extra outlook python -m app outlook N  (선택) Outlook '자동화' 폴더 첨부 → 그 작업의 입력 폴더
   uv run python -m app export-portable N --out FILE   작업 규칙을 무설치판용 JSON 으로 내보내기(대표 PC 전용)
+  uv run python -m app bundle-portable --out DIR [--작업 NN …]   친구 PC 로 복사할 무설치판 묶음 만들기(대표 PC 전용)
 """
 import argparse
 import os
@@ -42,7 +43,9 @@ from app.master import MasterError, load_master, lookup
 from app.organize import free_name
 from app.outlook import collect_from_outlook
 from app.outputs import _mark, company_form_name, company_rows
-from app.portable import export_rules, job_number_from
+from app.portable import (
+    BUNDLE_DIRS, BUNDLE_JOBS_DIR, BundleError, bundle_numbers, check_bundle_out, export_rules, job_number_from, make_bundle,
+)
 from app.rules import RuleError, load_rules
 from app.verify import failed, verify
 
@@ -103,6 +106,10 @@ def _parser():
     e = sub.add_parser("export-portable", help="작업 규칙을 무설치판용 JSON 으로 내보내기")
     e.add_argument("job", help="작업 번호")
     e.add_argument("--out", dest="out", required=True, help="만들 JSON 파일 경로")
+
+    b = sub.add_parser("bundle-portable", help="친구 PC 로 복사할 무설치판 묶음 만들기")
+    b.add_argument("--out", dest="out", required=True, help="묶음을 만들 새 폴더(저장소 · OneDrive · 네트워크 밖)")
+    b.add_argument("--작업", dest="jobs", nargs="+", help="묶을 작업 번호(생략하면 멈추지 않은 모든 작업)")
     return p
 
 
@@ -159,16 +166,32 @@ def _dispatch(args, repo_root) -> int:
             out = export_rules(job_number_from(args.job), _abs(args.out), work)
             print(f"무설치판 규칙을 내보냈습니다: {out}")
             return 0
+        if args.command == "bundle-portable":
+            return _bundle(work, args, repo_root)
         if args.command == "outlook":
             collect_from_outlook(find_job(work, args.job).input_dir)
             return 0
         raise AssertionError(args.command)
-    except (config.ConfigError, InitError, LocalOnlyError, JobError, JobLocked) as e:
+    except (config.ConfigError, InitError, LocalOnlyError, JobError, JobLocked, BundleError) as e:
         print(e)
         return 1
     except RuleError as e:
         print(f"규칙.yaml 오류: {e}")
         return 1
+
+
+def _bundle(work, args, repo_root) -> int:
+    out = _abs(args.out)
+    check_bundle_out(out, repo_root)  # 자리부터(작업을 고르기 전에). make_bundle 도 다시 본다
+    out = make_bundle(work, bundle_numbers(work, args.jobs), out, repo_root)
+    jobs = sorted(p.name for p in (out / BUNDLE_JOBS_DIR).iterdir())
+    print(f"무설치판 묶음을 만들었습니다: {out}")
+    print(f"  작업: {', '.join(jobs)}")
+    print(f"친구 PC 로 넘기는 법: 이 폴더 안의 {' · '.join(BUNDLE_DIRS)} 세 폴더를 친구 PC 의 한 폴더(예: C:\\사무자동화)에 "
+          "그대로 복사한 뒤, 그 안의 무설치판\\준비.bat 을 두 번 클릭하게 하세요.")
+    print("이미 준비한 친구 PC 면 같은 폴더에 덮어쓴 뒤 준비.bat 을 다시 두 번 클릭하게 하세요"
+          "(입력 · 출력 폴더는 그대로, 규칙 · 제목 · 출력 방식만 바뀝니다).")
+    return 0
 
 
 # --- 작업 목록 · 만들기 · 지우기 · 멈추기 ---
