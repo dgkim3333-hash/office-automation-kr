@@ -729,3 +729,65 @@ def test_excel_source_numbers_use_15_digits(run_engine, tmp_path):
     assert got == expected
     oks = [c["ok"] for c in got]
     assert True in oks and False in oks
+
+
+# --- 번호필드가 날짜 모양인 엑셀 PO 번호 ---
+
+@pytest.mark.parametrize("cell, ok", [
+    ("2026-10-26-1", False),     # 더 긴 번호의 일부
+    ("PO 2026-10-26", False),    # 앞에 글자가 붙은 번호의 일부
+    ("  2026-10-26 ", True),     # 칸 하나와 완전히 같다(앞뒤 공백은 뺌)
+], ids=["longer_number", "prefixed_number", "whole_cell"])
+def test_excel_number_field_in_date_shape_is_text(cell, ok, run_engine, tmp_path):
+    """번호필드 값이 「2026-10-26」 모양이어도 날짜가 아니라 글자로 칸 하나와 완전 일치를 본다(날짜로 되살리면 잘린 번호가 통과한다)."""
+    rules = example_rules()
+    wb = openpyxl.Workbook()
+    wb.active["A1"], wb.active["B1"] = "PO Number:", cell
+    path = tmp_path / "po.xlsx"
+    wb.save(path)
+    result = ExtractResult(doc_type=rules.get("PO"), is_excel=True, source_form="ACME", fields={"고객PO번호": "2026-10-26"})
+
+    expected, got = compare_grid(run_engine, rules, result, path)
+
+    assert got == expected
+    number = next(c for c in got if c["item"] == "고객PO번호")
+    assert number["ok"] is ok
+    assert number["source_value"] == ("2026-10-26" if ok else "원본에 없음")
+
+
+MEMORY_SCRIPT = """\
+param([string]$Lib, [string]$In, [string]$Out)
+. (Join-Path $Lib 'Values.ps1')
+. (Join-Path $Lib 'Rules.ps1')
+. (Join-Path $Lib 'ExtractText.ps1')
+. (Join-Path $Lib 'ExtractGrid.ps1')
+. (Join-Path $Lib 'Verify.ps1')
+$data = [IO.File]::ReadAllText($In, [Text.Encoding]::UTF8) | ConvertFrom-Json
+$rules = ConvertTo-PortableRules $data.rules
+$result = Get-GridExtract $rules $data.grid          # 메모리 객체 그대로(JSON 을 거치지 않음)
+$result.fields['고객PO번호'] = '2026-10-26'            # 원본 칸은 2026-10-26-1
+$checks = Get-Checks $result @{ kind = 'grid'; grid = $data.grid } $rules
+[IO.File]::WriteAllText($Out, (ConvertTo-ChecksJson $checks), (New-Object Text.UTF8Encoding $false))
+"""
+
+
+def test_in_memory_result_does_not_guess_dates(powershell_exe, tmp_path):
+    """PS 안에서 Get-GridExtract 결과를 그대로 Get-Checks 에 넘겨도(형식이 살아 있어 추측 경로를 안 탐) 날짜 모양 번호는 글자로 대조한다."""
+    rules = example_rules()
+    wb = openpyxl.Workbook()
+    wb.active["A1"], wb.active["B1"] = "PO Number:", "2026-10-26-1"
+    wb.active["A2"] = "Buyer:"
+    path = tmp_path / "po.xlsx"
+    wb.save(path)
+    script = tmp_path / "memory.ps1"
+    script.write_bytes(b"\xef\xbb\xbf" + MEMORY_SCRIPT.encode("utf-8"))
+    source = tmp_path / "in.json"
+    source.write_text(json.dumps({"rules": rules_to_portable(rules), "grid": grid_from_xlsx(path)}, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out.json"
+
+    done = run_powershell(powershell_exe, script, "-Lib", str(PORTABLE / "lib"), "-In", str(source), "-Out", str(out))
+
+    assert done.returncode == 0, decode_output(done.stderr)
+    checks = json.loads(out.read_text(encoding="utf-8-sig"))
+    number = next(c for c in checks if c["item"] == "고객PO번호")
+    assert number == {"item": "고객PO번호", "source_value": "원본에 없음", "result_value": "2026-10-26", "ok": False}

@@ -110,7 +110,7 @@ function ConvertFrom-IsoDate([string]$Text) {
     return $null
 }
 
-function ConvertFrom-ResultValue($Value, $Format, [bool]$IsExcel) {
+function ConvertFrom-ResultValue($Value, $Format, [bool]$GuessDate) {
     # JSON 에서 읽은 값 하나를 되살린다. 금액 · 날짜 형식인 칸의 글자는 [decimal] · [datetime](자리 그대로),
     # JSON 숫자는 정수면 [long], 소수점이 있으면 실수([double]). 서식 없는 엑셀 칸의 날짜 글자는 날짜로.
     if ($null -eq $Value) { return $null }
@@ -121,7 +121,7 @@ function ConvertFrom-ResultValue($Value, $Format, [bool]$IsExcel) {
         } elseif ($Format -ceq '날짜') {
             $day = ConvertTo-DateValue $Value
             if ($null -ne $day) { return $day }
-        } elseif ($IsExcel) {
+        } elseif ($GuessDate) {
             $day = ConvertFrom-IsoDate $Value
             if ($null -ne $day) { return $day }
         }
@@ -191,7 +191,9 @@ function ConvertTo-CheckModel($Rules, $Result, $Doc) {
     foreach ($entry in (Get-MapEntries (Get-ResultMember $Result 'fields'))) {
         $format = $null
         if ($formats.ContainsKey($entry.Name)) { $format = $formats[$entry.Name] }
-        $fields[$entry.Name] = if ($memory) { $entry.Value } else { ConvertFrom-ResultValue $entry.Value $format $isExcel }
+        # 번호필드의 글자는 날짜 모양이어도 글자로 둔다(PO 번호 "2026-10-26" 이 날짜로 되살아나 칸 하나와의 완전 일치 대신 글자 속 날짜 대조를 하면 잘린 번호가 통과한다)
+        $guessDate = $isExcel -and ($entry.Name -cne [string]$Doc.number_field)
+        $fields[$entry.Name] = if ($memory) { $entry.Value } else { ConvertFrom-ResultValue $entry.Value $format $guessDate }
     }
     $table = $null
     $rawTable = Get-ResultMember $Result 'table'
