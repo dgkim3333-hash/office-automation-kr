@@ -531,13 +531,7 @@ function Get-RunMarkup {
 
 function New-RunTempFile([string]$Name, [byte[]]$Bytes) {
     # %TEMP%\무설치판_<작업>_<날짜시각>_<임의>\<이름> 에 바이트를 쓴다(엑셀은 이 복사본을 연다). Remove-OfficeCopy 로 지운다.
-    $base = $env:TEMP
-    if ([string]::IsNullOrEmpty($base)) { $base = [IO.Path]::GetTempPath() }
-    $safe = $script:Run.job.name
-    foreach ($c in [IO.Path]::GetInvalidFileNameChars()) { $safe = $safe.Replace([string]$c, '_') }
-    $folder = Join-Path $base ('무설치판_{0}_{1}_{2}' -f $safe, (Get-Date).ToString('yyyyMMdd-HHmmss', $script:Invariant),
-                               [Guid]::NewGuid().ToString('N').Substring(0, 8))
-    [void][IO.Directory]::CreateDirectory($folder)
+    $folder = New-OfficeTempFolder $script:Run.job.name
     $path = Join-Path $folder $Name
     try { [IO.File]::WriteAllBytes($path, $Bytes) } catch { Remove-OfficeCopy @{ Folder = $folder; Path = $path }; throw }
     return @{ Folder = $folder; Path = $path }
@@ -562,9 +556,14 @@ function Invoke-OneDocument([string]$Path) {
     } catch { return }
     if ($age -lt $script:SettleSeconds) { Add-RunDone $Path '보류' $script:SettlingReason; return }
     try { $fp = Get-FileFingerprint $Path } catch { Add-RunDone $Path '보류' $script:HeldReason; return }
+    # 시험용: 지문을 구한 바로 뒤 파일이 사라지는 경우를 만든다(환경 변수가 있을 때만)
+    if (-not [string]::IsNullOrEmpty($env:NOINSTALL_TEST_VANISH) -and $name -eq $env:NOINSTALL_TEST_VANISH) { [IO.File]::Delete($Path) }
     if (Test-RunSkip $fp) { return }   # 이미 처리한 원본은 PDF 뷰어에 열려 있어도 보류로 세지 않는다
-    $attributes = [IO.File]::GetAttributes($Path)
-    if (-not ($attributes -band [IO.FileAttributes]::ReadOnly) -and (Test-FileLocked $Path)) {   # 읽기 전용은 잠김 검사가 늘 실패하므로 건너뜀
+    # 지금 판 os.access(path, W_OK): 읽기 전용 · 그새 사라진 파일 · 속성을 못 읽는 파일은 거짓 → 잠김 검사를 건너뛰고,
+    # 사라진 파일은 아래 읽기에서 그 파일만 확인필요(파일을 읽지 못함)가 된다. 다른 문서는 계속 처리한다.
+    $writable = $false
+    try { $writable = -not ([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReadOnly) } catch { $writable = $false }
+    if ($writable -and (Test-FileLocked $Path)) {   # 읽기 전용은 잠김 검사가 늘 실패하므로 건너뜀
         Add-RunDone $Path '보류' $script:HeldReason
         return
     }

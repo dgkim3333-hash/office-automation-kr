@@ -121,10 +121,10 @@ function Invoke-NotifyOp($Payload) {
     #   text      {title, report}        → {text}   (Get-ReportText)
     #   toast_xml {title, body, folder?} → {xml}    (Get-ToastXml)
     switch ([string]$Payload.action) {
-        'text' { return ConvertTo-Json -InputObject @{ text = (Get-ReportText ([string]$Payload.title) $Payload.report) } -Compress }
+        'text' { return ConvertTo-Json -InputObject @{ text = (Get-ReportText ([string]$Payload.title) $Payload.report) } -Depth 20 -Compress }
         'toast_xml' {
             $folder = if ($null -ne $Payload.PSObject.Properties['folder']) { [string]$Payload.folder } else { '' }
-            return ConvertTo-Json -InputObject @{ xml = (Get-ToastXml ([string]$Payload.title) ([string]$Payload.body) $folder) } -Compress
+            return ConvertTo-Json -InputObject @{ xml = (Get-ToastXml ([string]$Payload.title) ([string]$Payload.body) $folder) } -Depth 20 -Compress
         }
         default { throw "notify action '$($Payload.action)' 는 없습니다." }
     }

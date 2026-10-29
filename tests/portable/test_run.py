@@ -652,14 +652,21 @@ def test_markup_read_once_at_start(tmp_path, clean_temp, no_leftover):
     proc = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
                              str(DISPATCHER), "-Command", "실행", "-Job", "1", "-Work", str(env.work), "-Output", str(out),
                              "-NoNotify"])
+    swapped = False
     try:
         deadline = time.monotonic() + 120
         while not any(name == "WINWORD.EXE" for name, _ in automation_pids() - before):   # 워드가 뜸 = 마크업표 바이트는 이미 읽음
             assert proc.poll() is None and time.monotonic() < deadline, "워드가 뜨지 않음"
             time.sleep(0.3)
         shutil.copyfile(changed, markup)
+        swapped = True
     finally:
-        proc.wait(timeout=RUN_TIMEOUT)
+        try:
+            proc.wait(timeout=RUN_TIMEOUT if swapped else 60)   # 위에서 실패했으면 오래 기다리지 않는다
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=60)
+    assert proc.returncode == 0
     report = json.loads(out.read_text(encoding="utf-8-sig"))
 
     assert counts(report) == {"성공": 1, "중복": 0, "확인필요": 0, "보류": 0}, report["message"]
@@ -691,6 +698,26 @@ def test_company_failure_rolls_back_ledger(tmp_path, clean_temp, no_leftover):
     assert len(sheet_rows(ledger, "PO")) == 1
     assert not (env.out / "회사양식_SO입력_PO-ACME-2026-0417.xlsx").exists()
     assert [r["상태"] for r in env.records()] == ["성공", "확인필요"]
+
+
+@office
+@pytest.mark.office
+def test_file_vanishing_mid_run_affects_only_that_file(tmp_path, clean_temp, no_leftover, monkeypatch):
+    """지문을 구한 뒤 파일이 사라져도(옮김 · 지움) 그 파일만 영향: 지금 판처럼(os.access 거짓 → 읽기 실패) 확인필요,
+    다른 문서는 처리하고 실행은 정상으로 끝난다(last_run 저장)."""
+    env = Env(tmp_path, "누적장부", example_text())
+    drop(INVOICE, env.inp)
+    drop(ACME, env.inp)
+    monkeypatch.setenv("NOINSTALL_TEST_VANISH", INVOICE.name)   # 시험용: 지문을 구한 바로 뒤 이 이름의 파일을 지운다
+    now = datetime.now().replace(microsecond=0)
+
+    report = run_portable(env, now)
+
+    assert counts(report) == {"성공": 1, "중복": 0, "확인필요": 1, "보류": 0}, report["message"]
+    assert "사유: 파일을 읽지 못함: " in env.note(INVOICE.name).read_text(encoding="utf-8")
+    assert [(r["파일"], r["상태"]) for r in env.records()] == [(INVOICE.name, "확인필요"), (ACME.name, "성공")]
+    settings = json.loads((env.folder / "작업설정.json").read_text(encoding="utf-8"))
+    assert settings["last_run"] == now.date().isoformat()
 
 
 @office

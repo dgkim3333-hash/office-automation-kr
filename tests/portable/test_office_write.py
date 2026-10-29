@@ -577,7 +577,14 @@ def test_locked_ledger(tmp_path, clean_temp, run_engine, no_leftover):
     rules = example_rules()
     docs = documents(rules)
     book = tmp_path / "누적장부.xlsx"
-    ledger_add(run_engine, book, rules, *docs[0][:2], WHEN[0], docs[0][2])
+    # 이 시험은 잠김을 본다. Quit 뒤 스스로 끝났는지(forced == 0)는 전체 시험 부하에서 흔들리므로 보지 않고,
+    # 띄운 엑셀이 남지 않았는지만 본다(남은 것은 엔진이 이미 끝냈어야 한다)
+    start = automation_pids()
+    first = run_engine("office_write", {"action": "ledger_add", "ledger": str(book), "rules": rules_to_portable(rules),
+                                        "result": result_json(docs[0][0]), "source": docs[0][1], "when": _iso(WHEN[0]),
+                                        "organized": str(docs[0][2])})
+    assert first["saved"] is True and first["locked"] is False
+    assert automation_pids() - start == set(), "장부를 쓴 엑셀이 남음"
     data, stamp = book.read_bytes(), book.stat().st_mtime_ns
 
     script = tmp_path / "holder.ps1"

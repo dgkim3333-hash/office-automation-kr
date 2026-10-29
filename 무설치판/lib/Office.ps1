@@ -96,10 +96,8 @@ function Test-PdfWarningOff {
 
 # ---- 임시 복사본 --------------------------------------------------------------------------------
 
-function New-OfficeCopy([string]$Path, [string]$Job) {
-    # %TEMP%\무설치판_<작업>_<날짜시각>_<임의>\ 에 복사본을 만든다(이름은 그대로). 복사본의 인터넷 표시(Zone.Identifier)만 지운다.
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "파일이 없습니다: $Path" }
-    $source = (Resolve-Path -LiteralPath $Path).ProviderPath   # .NET 복사는 PowerShell 의 현재 폴더를 모른다
+function New-OfficeTempFolder([string]$Job) {
+    # 새 임시 폴더 %TEMP%\무설치판_<작업>_<날짜시각>_<임의>\ 를 만들어 경로를 돌려준다(작업 이름의 파일 이름에 못 쓰는 글자는 _). 지우기는 Remove-OfficeCopy.
     $base = $env:TEMP
     if ([string]::IsNullOrEmpty($base)) { $base = [IO.Path]::GetTempPath() }
     $safe = $Job
@@ -107,6 +105,14 @@ function New-OfficeCopy([string]$Path, [string]$Job) {
     $random = [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $folder = Join-Path $base ('무설치판_{0}_{1}_{2}' -f $safe, (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture), $random)
     [void][IO.Directory]::CreateDirectory($folder)
+    return $folder
+}
+
+function New-OfficeCopy([string]$Path, [string]$Job) {
+    # %TEMP%\무설치판_<작업>_<날짜시각>_<임의>\ 에 복사본을 만든다(이름은 그대로). 복사본의 인터넷 표시(Zone.Identifier)만 지운다.
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "파일이 없습니다: $Path" }
+    $source = (Resolve-Path -LiteralPath $Path).ProviderPath   # .NET 복사는 PowerShell 의 현재 폴더를 모른다
+    $folder = New-OfficeTempFolder $Job
     $copy = Join-Path $folder ([IO.Path]::GetFileName($source))
     try {
         [IO.File]::Copy($source, $copy)
