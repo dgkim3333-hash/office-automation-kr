@@ -244,7 +244,7 @@ tests\portable\                 (새) conftest.py(마커 · ps 실행 도우미)
   - 친구 PC 작업 폴더 `<작업폴더>\작업\NN_제목\`: `작업설정.json`(`{number, title, input_dir, output_dir, output_mode: "회사양식"|"누적장부"|"둘다", time: "16:00", method: "작업스케줄러"|"시작프로그램"|"없음", last_run}`), `규칙.json`, `처리기록.csv`(열 = `지문 · 파일 · 문서종류 · 번호 · 상태 · 규칙지문 · 날짜 · 마크업지문`, 지문 = 파일 내용 SHA-256), `처리로그.csv`, `실행기록.txt`, `확인필요\원본이름.txt`, `검산\`, `실행중.lock`. 마크업표는 `<작업폴더>\마크업표.xlsx`. 장부는 출력 폴더 `누적장부_<제목>.xlsx`.
   - 동작 기준은 `app\job_run.py` 에서 승인 · 고객마스터를 뺀 것: 처리 순서, `SETTLE_SECONDS = 60`, 이미 성공한 지문 건너뜀, 확인필요 재시도(날짜가 바뀜 · 규칙지문이 바뀜 · 마크업지문이 바뀜), 같은 문서종류 · 번호는 `중복`, 장부 · 결과가 열려 있으면 그 실행 `보류`(문구 `LEDGER_LOCKED_REASON` · `HELD_REASON` 과 같게), 잠금 파일로 겹쳐 돌지 않음(`이 작업이 이미 실행 중입니다`), 확인필요 .txt 문구는 지금 판과 같음(`RETRY_NOTE` · `KEEP_HINT`). 알림 문구는 `app\notify.py` `report_text` 와 같은 모양.
 - [ ] **Step 1: 실패하는 시험(`@office`, 모두 `tmp_path` 작업 폴더)**
-  - `test_same_outputs_as_python`: 입력 폴더에 샘플 PDF 4개 + 엑셀 2개(파일 시각을 2분 전으로) → 무설치판 실행 결과(회사 양식 파일들 · 장부)가 지금 판 `run_job(job, work, gate=통과)` 결과와 칸마다 같다. 보고 숫자도 같다.
+  - `test_same_outputs_as_python`: 입력 폴더에 샘플 PDF 4개 + 엑셀 2개(파일 시각을 2분 전으로) → 무설치판 실행 결과(회사 양식 파일들 · 장부)가 지금 판 `run_job(job, work, gate=None)`(승인 없이 — 기존 tests	est_job_run.py 방식) 결과와 칸마다 같다. 보고 숫자도 같다.
   - `@po_test_kit` `test_po_test_kit_matches_answer`: `C:\PO시험\01_입력예시` 3개를 `tmp_path` 입력 폴더로 복사 → 회사 양식 3개 · 장부가 `04_정답` 의 정답표와 같다(`03_…\마크업표.xlsx` 복사본 사용).
   - `test_rerun_skips_and_renamed_skips`: 두 번째 실행 → 성공 0, 파일 이름을 바꿔도 0.
   - `test_settling_file_waits`: 방금 쓴 파일 → 처리 안 함, 다음 실행(시각 +2분) 때 처리.
