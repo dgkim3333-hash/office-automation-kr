@@ -355,6 +355,7 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
         pdf_skipped = 0; pdf_ok = $true; pdf_self_test = $null; excel_skipped = 0; excel_self_test = $null
     }
     $R = $script:Run
+    $script:OfficeHandovers.Clear()
     $stop = Get-PreflightProblem $Job
     if ($null -ne $stop) { return New-StoppedReport $Job.title $stop }
 
@@ -429,6 +430,9 @@ function Invoke-JobRun($Job, [string]$Work, [datetime]$Now) {
         $R.warnings.Add(("경고: 입력 폴더에 남은 파일을 세지 못함 ({0})" -f $_.Exception.Message))
     }
     $R.report.ledger_locked = $R.ledger_locked
+    # 숨은 오피스에 친구가 연 문서가 있어 끝내지 않고 넘겨 준 일(Office.ps1 의 Exit-OfficeApp)은 실행기록에 남긴다
+    foreach ($note in $script:OfficeHandovers) { $R.report.office_notes.Add($note) }
+    $script:OfficeHandovers.Clear()
     $R.report.message = Get-RunMessage
     $R.report.has_news = Test-ReportNews $R.report
     return $R.report
@@ -572,8 +576,8 @@ function Get-RunMarkup {
 }
 
 function New-RunTempFile([string]$Name, [byte[]]$Bytes) {
-    # %TEMP%\무설치판_<작업>_<날짜시각>_<임의>\<이름> 에 바이트를 쓴다(엑셀은 이 복사본을 연다). Remove-OfficeCopy 로 지운다.
-    $folder = New-OfficeTempFolder $script:Run.job.name
+    # %TEMP%\무설치판_<임의>\<이름> 에 바이트를 쓴다(엑셀은 이 복사본을 연다). Remove-OfficeCopy 로 지운다.
+    $folder = New-OfficeTempFolder
     $path = Join-Path $folder $Name
     try { [IO.File]::WriteAllBytes($path, $Bytes) } catch { Remove-OfficeCopy @{ Folder = $folder; Path = $path }; throw }
     return @{ Folder = $folder; Path = $path }
@@ -620,14 +624,14 @@ function Invoke-OneDocument([string]$Path) {
             $timeout = $script:OfficeTimeoutSec
             if ($null -ne $script:RunWordTimeoutSec) { $timeout = [int]$script:RunWordTimeoutSec }
             try {
-                $read = Read-WordText $Path $timeout $R.job.name
+                $read = Read-WordText $Path $timeout
             } finally { Add-OfficeNote $name '워드 읽기' }
             if ($null -ne $read.close_error) { $R.report.office_notes.Add(("참고: {0} 워드 문서를 닫지 못함: {1}" -f $name, $read.close_error)) }
             $source = @{ kind = 'text'; text = [string]$read.text }
             $result = Get-TextExtract $R.rules ([string]$read.text)
         } else {
             try {
-                $grid = Read-ExcelGrid $Path $script:OfficeTimeoutSec $R.job.name
+                $grid = Read-ExcelGrid $Path $script:OfficeTimeoutSec
             } finally { Add-OfficeNote $name '엑셀 읽기' }
             $source = @{ kind = 'grid'; grid = $grid }
             $result = Get-GridExtract $R.rules $grid
@@ -644,6 +648,8 @@ function Invoke-OneDocument([string]$Path) {
         return   # 판별 실패: 다른 작업 몫일 수 있으므로 기록하지 않고 그대로 둔다
     }
     if ($null -ne $result.review_reason) { Add-RunReview $Path $fp $result $result.review_reason; return }
+    $tableProblem = Get-TableProblem $R.rules $result   # 표 줄이 어긋나 품목이 통째로 빠진 결과를 「성공」 으로 내보내지 않는다
+    if ($null -ne $tableProblem) { Add-RunReview $Path $fp $result $tableProblem; return }
     $doc = Get-WriterDoc $R.rules ([string]$result.doc_type)
     $numberText = ConvertTo-FormatText $result.fields[[string]$doc.number_field]
     $key = [string]$doc.name + "`0" + $numberText

@@ -256,6 +256,7 @@ $script:WriterBody = {
     function Write-Book($Excel, $Step) {
         $books = Hold $Excel.Workbooks
         $book = Hold $books.Add(-4167)            # xlWBATWorksheet: 시트 한 장짜리 새 문서(사용자 설정의 시트 수와 무관)
+        $mine.Add([string]$book.FullName)         # 우리가 만든 문서(끝낼 때 이것만 닫는다)
         try {
             $sheets = Hold $book.Worksheets
             $index = 0
@@ -393,6 +394,7 @@ $script:WriterBody = {
             $book = Hold $books.Open($Step.path, 0, $true)     # 장부의 임시 복사본을 읽기 전용으로(고친 판은 tmp 로)
         } else {
             $book = Hold $books.Add(-4167)
+            $mine.Add([string]$book.FullName)
             $first = Hold (Hold $book.Worksheets).Item(1)
             $first.Name = $layout.items
             $second = Hold (Hold $book.Worksheets).Add($missing, $first)
@@ -475,13 +477,20 @@ $script:WriterBody = {
     }
 
     $excel = $null
+    # 우리가 여는 · 만드는 문서의 전체 경로(끝낼 때 이것만 닫고, 남의 문서가 남아 있으면 Quit 하지 않고 넘겨 준다. Office.ps1 의 Exit-OfficeApp)
+    $mine = New-Object System.Collections.Generic.List[string]
+    foreach ($step in $Plan.steps) {
+        foreach ($key in @('path', 'tmp')) { if ($step.ContainsKey($key) -and $step[$key]) { $mine.Add([string]$step[$key]) } }
+    }
     try {
         $excel = Hold (New-Object -ComObject Excel.Application)
+        Assert-OfficeFresh $excel 'excel'       # 이미 통합 문서가 열린 엑셀이면 우리 것이 아니다: 손대지 않고 오류(finally 도 Quit 하지 않음)
         $excel.Visible = $false
         $excel.DisplayAlerts = $false
         $excel.ScreenUpdating = $false
         $excel.EnableEvents = $false
         $excel.AutomationSecurity = 3           # msoAutomationSecurityForceDisable (매크로 끔, 이 엑셀에만)
+        Invoke-OfficeTestExtra $excel 'excel'
         $results = New-Object System.Collections.Generic.List[object]
         foreach ($step in $Plan.steps) {
             switch ([string]$step.kind) {
@@ -494,7 +503,7 @@ $script:WriterBody = {
         }
         [pscustomobject]@{ results = $results.ToArray() }
     } finally {
-        if ($null -ne $excel) { try { $excel.Quit() } catch { } }
+        Exit-OfficeApp $excel 'excel' $mine.ToArray()   # 남의 통합 문서가 남아 있으면 Quit 대신 보이게 넘겨 준다
         for ($i = $held.Count - 1; $i -ge 0; $i--) {
             try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($held[$i]) } catch { }
         }
@@ -825,7 +834,7 @@ function Compare-ReadBack($SavedRows, [string]$Sheet, $Header, $Rows) {
 function Test-ReadBack([string]$Path, [string]$Sheet, $Header, $Rows) {
     # 저장된 파일(한 파일 = 한 문서)의 시트를 다시 열어 머리글과 각 칸이 쓴 값과 같은지 본다. 다른 칸의 설명 목록 List[string](같으면 빈 목록).
     # 파일은 임시 복사본을 연다(원본은 열지 않음).
-    $copy = New-OfficeCopy $Path '다시읽기'
+    $copy = New-OfficeCopy $Path
     try {
         $raw = (Invoke-ExcelWrite @(@{ kind = 'read'; path = $copy.Path; sheet = $Sheet }))[0]
     } finally {
@@ -981,7 +990,7 @@ function Invoke-LedgerStep([string]$LedgerPath, $Rules, $Entry, $Logs) {
     $copy = $null
     try {
         $source = $LedgerPath
-        if ($existed) { $copy = New-OfficeCopy $LedgerPath '장부'; $source = $copy.Path }
+        if ($existed) { $copy = New-OfficeCopy $LedgerPath; $source = $copy.Path }
         $raw = (Invoke-ExcelWrite @((New-LedgerStep $source $existed $tmp $Rules $Entry $Logs)))[0]
     } catch {
         Remove-LedgerTmp $tmp
@@ -1134,7 +1143,7 @@ function Test-LedgerDuplicate($LedgerPath, $DocType, $Number) {
     # 장부의 그 문서종류 시트에 같은 번호가 있는지(지금 판 is_duplicate). $DocType = 규칙의 문서종류 객체(name · number_field), $Number = 번호 값.
     # 장부 · 시트 · 번호 열이 없으면 $false. 장부는 임시 복사본을 읽는다(열려 있어도 됨).
     if (-not [IO.File]::Exists([string]$LedgerPath)) { return $false }
-    $copy = New-OfficeCopy ([string]$LedgerPath) '장부'
+    $copy = New-OfficeCopy ([string]$LedgerPath)
     try {
         $raw = (Invoke-ExcelWrite @(@{ kind = 'dup'; path = $copy.Path; sheet = [string]$DocType.name; column = [string]$DocType.number_field
                                        number = (ConvertTo-FormatText $Number) }))[0]
@@ -1155,6 +1164,8 @@ function ConvertTo-OpJson($Map) {
     $out = [ordered]@{}
     foreach ($key in $Map.Keys) { $out[$key] = $Map[$key] }
     $out['forced'] = $script:OfficeForced
+    $out['left'] = $null      # 남의 문서가 있어 엑셀을 끝내지 않고 넘겨 준 기록(Office.ps1, 정상 $null)
+    if ($script:OfficeHandovers.Count -gt 0) { $out['left'] = [string]::Join("`n", $script:OfficeHandovers.ToArray()) }
     return ConvertTo-Json -InputObject $out -Depth 20 -Compress
 }
 
@@ -1166,13 +1177,18 @@ function Invoke-WriterOp($Payload) {
     #   ledger_log   {ledger, rules, logs: [{when, file, outcome, reason}]}  → 같은 모양
     #   ledger_dup   {ledger, rules, doc_type, number}                       → {duplicate, forced}
     #   undo_ledger  {added: ledger_add 의 결과}                             → {}
-    #   read_back    {path, sheet, header, rows: [[칸 JSON | null]]}         → {problems, forced}
+    #   read_back    {path, sheet, header, rows: [[칸 JSON | null]]}         → {problems, forced, left}
     #   locked       {path}                                                  → {locked}
     # 결과 JSON 은 작업 2 · 3 의 결과, 칸 JSON 은 작업 6 의 {t, v}. 일시는 'YYYY-MM-DDTHH:MM:SS'.
     # 어느 action 이든 timeout(초)을 주면 엑셀 한 번에 주는 시간을 바꾼다(시험에서 시간 초과를 흉내 낼 때).
     $action = [string](Get-MarkupProp $Payload 'action')
     $timeout = Get-MarkupProp $Payload 'timeout'
     if ($null -ne $timeout) { $script:OfficeTimeoutSec = [int]$timeout }
+    # 시험용(Office.ps1 의 남의 문서 보호): test_preopen · test_extra 는 처음 띄우는 엑셀에서 같은 인스턴스로 열 파일
+    $hooks = @{}
+    foreach ($key in @('preopen', 'extra')) { $value = Get-MarkupProp $Payload ('test_' + $key); if ($value) { $hooks[$key] = [string]$value } }
+    if ($hooks.Count -gt 0) { $script:OfficeTestHooks = $hooks }
+    $script:OfficeHandovers.Clear()
     if ($action -ceq 'locked') {
         return ConvertTo-Json -InputObject ([ordered]@{ locked = (Test-FileLocked ([string]$Payload.path)) }) -Depth 20 -Compress
     }

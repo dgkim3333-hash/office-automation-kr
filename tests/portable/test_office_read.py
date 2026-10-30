@@ -103,6 +103,7 @@ def read_word(run_engine, path, timeout=READ_TIMEOUT) -> dict:
     out = run_engine("office", {"action": "read_word", "path": str(path), "timeout": timeout})
     assert out.pop("close_error") is None, "워드 문서 닫기가 실패함"
     assert out.pop("forced") == 0, "Quit 한 워드가 스스로 끝나지 않아 강제로 끝냄"
+    assert out.pop("left") is None, "남의 문서가 없는데 워드를 넘겨 줌"
     return out
 
 
@@ -110,6 +111,7 @@ def read_excel(run_engine, path, timeout=READ_TIMEOUT) -> dict:
     """격자. 엑셀이 Quit 뒤 스스로 끝났는지(COM 참조를 다 놓았는지)도 본다."""
     out = run_engine("office", {"action": "read_excel", "path": str(path), "timeout": timeout})
     assert out["forced"] == 0, "Quit 한 엑셀이 스스로 끝나지 않아 강제로 끝냄(COM 참조가 남음)"
+    assert out["left"] is None, "남의 문서가 없는데 엑셀을 넘겨 줌"
     return out["grid"]
 
 
@@ -191,21 +193,22 @@ def test_normalize_word_rows_on_two_pages(run_engine):
 
 
 def test_new_copy_fresh_folder_without_internet_mark(tmp_path, temp_dir, run_engine):
-    """복사본: 실행마다 새 이름의 폴더(무설치판_<작업>_<날짜시각>_<임의>), 이름 · 바이트는 그대로, 인터넷 표시는 복사본에서만 지운다."""
+    """복사본: 실행마다 새 이름의 짧은 폴더(무설치판_<임의 8자>), 파일 이름은 원본<확장자>(긴 이름이 경로 한도를 넘지 않게),
+    바이트는 그대로, 인터넷 표시는 복사본에서만 지운다."""
     original = tmp_path / "메일_Order 시험-PO 1.pdf"
     original.write_bytes(b"%PDF-1.4 fake")
     zone = b"[ZoneTransfer]\r\nZoneId=3\r\n"
     with open(f"{original}:Zone.Identifier", "wb") as f:
         f.write(zone)
 
-    first = run_engine("office", {"action": "new_copy", "path": str(original), "job": "01_발주/PO"})
-    second = run_engine("office", {"action": "new_copy", "path": str(original), "job": "01_발주/PO"})
+    first = run_engine("office", {"action": "new_copy", "path": str(original)})
+    second = run_engine("office", {"action": "new_copy", "path": str(original)})
 
     for made in (first, second):
         folder, copy = Path(made["folder"]), Path(made["path"])
         assert folder.parent == temp_dir
-        assert re.fullmatch(r"무설치판_01_발주_PO_\d{8}-\d{6}_[0-9a-f]{8}", folder.name), folder.name
-        assert copy == folder / original.name and copy.read_bytes() == original.read_bytes()
+        assert re.fullmatch(r"무설치판_[0-9a-f]{8}", folder.name), folder.name
+        assert copy == folder / "원본.pdf" and copy.read_bytes() == original.read_bytes()
         with pytest.raises(FileNotFoundError):
             open(f"{copy}:Zone.Identifier", "rb")
     assert first["folder"] != second["folder"]
@@ -215,14 +218,14 @@ def test_new_copy_fresh_folder_without_internet_mark(tmp_path, temp_dir, run_eng
 
 @pytest.mark.parametrize("app", ["word", "excel"])
 def test_office_opens_the_copy(app, tmp_path, temp_dir, run_engine):
-    """오피스 일에 넘기는 경로는 원본이 아니라 새 임시 폴더의 복사본(같은 이름)이다. 일이 끝나면 폴더는 지운다(오피스 없이)."""
+    """오피스 일에 넘기는 경로는 원본이 아니라 새 임시 폴더의 복사본(원본<확장자>)이다. 일이 끝나면 폴더는 지운다(오피스 없이)."""
     original = tmp_path / ("메일_Order 시험-PO 1.pdf" if app == "word" else "주문 1.xlsx")
     original.write_bytes(b"fake")
 
     out = run_engine("office", {"action": "work_path", "app": app, "path": str(original)})
 
     given = Path(out["path"])
-    assert given != original and given.name == original.name
+    assert given != original and given.name == "원본" + original.suffix
     assert given.parent.parent == temp_dir and given.parent.name.startswith("무설치판_")
     assert own_temp(temp_dir) == []
 
@@ -230,7 +233,7 @@ def test_office_opens_the_copy(app, tmp_path, temp_dir, run_engine):
 def test_new_copy_failure_leaves_no_folder(tmp_path, temp_dir, run_engine):
     """복사가 실패하면(없는 파일 · 다른 프로그램이 잠근 파일) 오류를 내고 만든 임시 폴더는 남기지 않는다."""
     with pytest.raises(EngineError):
-        run_engine("office", {"action": "new_copy", "path": str(tmp_path / "없음.pdf"), "job": "01"})
+        run_engine("office", {"action": "new_copy", "path": str(tmp_path / "없음.pdf")})
     assert own_temp(temp_dir) == []
 
     locked = tmp_path / "잠김.pdf"
@@ -239,7 +242,7 @@ def test_new_copy_failure_leaves_no_folder(tmp_path, temp_dir, run_engine):
         msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1000)   # 읽기를 막는 잠금(복사가 도중에 실패)
         try:
             with pytest.raises(EngineError):
-                run_engine("office", {"action": "new_copy", "path": str(locked), "job": "01"})
+                run_engine("office", {"action": "new_copy", "path": str(locked)})
         finally:
             f.seek(0)
             msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1000)
@@ -350,6 +353,38 @@ def test_korean_name_and_original_untouched(suffix, tmp_path, temp_dir, run_engi
     assert own_temp(temp_dir) == [], "임시 폴더가 남음"
 
 
+def long_named(tmp_path: Path, source: Path, total: int = 240) -> Path:
+    """전체 경로가 total 자(한글 · 띄어쓰기 섞임)인 원본 복사. 메일 첨부의 긴 이름 흉내."""
+    folder = tmp_path / "메일 첨부 받은 폴더"
+    folder.mkdir(exist_ok=True)
+    stem = "메일_Order 긴 이름 시험 "
+    room = total - len(str(folder)) - 1 - len(source.suffix)
+    assert room > len(stem) + 20, "tmp_path 가 너무 길어 시험할 수 없음"
+    name = (stem + "가나다 ABC-123 " * 40)[:room].rstrip() + source.suffix
+    path = folder / name
+    shutil.copyfile(source, path)
+    assert len(str(path)) >= total - 2
+    return path
+
+
+@office
+@pytest.mark.office
+@pytest.mark.parametrize("suffix", [".pdf", ".xlsx"])
+def test_long_name_reads(suffix, tmp_path, temp_dir, run_engine, no_leftover):
+    """전체 경로가 240 자쯤인 원본도 읽는다: 오피스가 여는 복사본은 짧은 경로(%TEMP%\\무설치판_<임의>\\원본<확장자>)라
+    엑셀 218 자 · 워드 MAX_PATH 한도에 걸리지 않는다. 읽은 값은 짧은 이름의 같은 파일과 같다."""
+    source = SAMPLE_PDFS[2] if suffix == ".pdf" else SAMPLE_XLSX[0]
+    original = long_named(tmp_path, source)
+    short = tmp_path / f"짧음{suffix}"
+    shutil.copyfile(source, short)
+
+    if suffix == ".pdf":
+        assert read_word(run_engine, original) == read_word(run_engine, short)
+    else:
+        assert read_excel(run_engine, original) == read_excel(run_engine, short)
+    assert own_temp(temp_dir) == [], "임시 폴더가 남음"
+
+
 @office
 @pytest.mark.office
 @pytest.mark.parametrize("action,message", [("read_word", WORD_TIMEOUT), ("read_excel", EXCEL_TIMEOUT)])
@@ -395,6 +430,111 @@ def test_reopen_after_crash(tmp_path, run_engine, no_leftover):
 
     out = read_word(run_engine, pdf, timeout=60)
     assert "Invoice No: INV-2026-10231" in out["text"]
+
+
+# --- 남의 문서 보호(최종 검토 I3): 숨은 오피스에 친구가 연 문서가 들어온 경우 ---
+
+def friend_document(tmp_path: Path, app: str) -> Path:
+    """친구가 연 문서 흉내(엑셀 통합 문서 · 워드가 여는 RTF). 우리 인스턴스에 이 파일을 연다(두 번 클릭 흉내)."""
+    if app == "excel":
+        path = tmp_path / "친구 문서.xlsx"
+        book = openpyxl.Workbook()
+        book.active["A1"] = "친구가 쓰던 표"
+        book.save(path)
+    else:
+        path = tmp_path / "친구 문서.rtf"
+        path.write_bytes(b"{\\rtf1\\ansi friend's notes\\par}")
+    return path
+
+
+def is_locked(path: Path) -> bool:
+    """오피스가 그 파일을 열고 있으면(쓰기로 열 수 없음) True."""
+    try:
+        with open(path, "r+b"):
+            return False
+    except PermissionError:
+        return True
+
+
+def window_shown(pid: int, wait: float = 15) -> bool:
+    """그 프로세스에 화면 창(MainWindowHandle)이 생겼는지(최대 wait 초 기다림)."""
+    deadline = time.monotonic() + wait
+    while True:
+        done = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                               f"(Get-Process -Id {pid} -ErrorAction SilentlyContinue).MainWindowHandle"],
+                              capture_output=True, text=True, timeout=60)
+        if done.stdout.strip() not in ("", "0"):
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.5)
+
+
+def kill_new_office(before: set) -> None:
+    """시험이 띄운(시험 전에 없던) /Automation 오피스를 끝내고 사라질 때까지 기다린다."""
+    for _, pid in automation_pids() - before:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    deadline = time.monotonic() + 30
+    while automation_pids() - before and time.monotonic() < deadline:
+        time.sleep(0.5)
+
+
+HANDOVER = {
+    "excel": "참고: 숨은 엑셀에 이 프로그램이 열지 않은 통합 문서(친구 문서.xlsx)가 열려 있어 엑셀을 끝내지 않고 화면에 보이게 넘겼습니다(저장은 직접 하세요).",
+    "word": "참고: 숨은 워드에 이 프로그램이 열지 않은 문서(친구 문서.rtf)가 열려 있어 워드를 끝내지 않고 화면에 보이게 넘겼습니다(저장은 직접 하세요).",
+}
+FOREIGN = {
+    "excel": "새로 띄운 엑셀에 이미 다른 통합 문서가 열려 있어(사용자가 연 엑셀일 수 있음) 손대지 않았습니다.",
+    "word": "새로 띄운 워드에 이미 다른 문서가 열려 있어(사용자가 연 워드일 수 있음) 손대지 않았습니다.",
+}
+
+
+@office
+@pytest.mark.office
+@pytest.mark.parametrize("app", ["excel", "word"])
+def test_hidden_office_hands_over_friends_document(app, tmp_path, temp_dir, run_engine, no_leftover):
+    """읽는 동안 친구가 연 문서가 우리 숨은 인스턴스에 들어오면: 우리 문서만 닫고 Quit 하지 않는다. 인스턴스는 살아서 화면에 보이고
+    친구 문서는 열린 채, 넘겨 준 기록(left)이 남는다. 읽기 결과는 그대로."""
+    friend = friend_document(tmp_path, app)
+    before = automation_pids()
+    try:
+        if app == "excel":
+            out = run_engine("office", {"action": "read_excel", "path": str(SAMPLE_XLSX[0]), "test_extra": str(friend)})
+            assert out["grid"]["sheets"][0]["name"] == "Purchase Order"
+        else:
+            out = run_engine("office", {"action": "read_word", "path": str(SAMPLE_PDFS[2]), "test_extra": str(friend)})
+            assert "Invoice No: INV-2026-10231" in out["text"]
+        mine = automation_pids() - before
+        assert len(mine) == 1, f"우리 인스턴스가 끝나 버림(친구 문서도 함께 닫힘): {sorted(mine)}"
+        assert is_locked(friend), "친구 문서가 닫힘"
+        assert window_shown(next(iter(mine))[1]), "넘겨 준 인스턴스가 화면에 보이지 않음"
+        assert out["left"] == HANDOVER[app]
+        assert out["forced"] == 0
+        assert own_temp(temp_dir) == [], "임시 폴더가 남음"
+    finally:
+        kill_new_office(before)
+
+
+@office
+@pytest.mark.office
+@pytest.mark.parametrize("app", ["excel", "word"])
+def test_office_with_open_document_is_not_ours(app, tmp_path, temp_dir, run_engine, no_leftover):
+    """만든 직후 이미 문서가 열린 인스턴스(사용자 오피스에 붙은 경우 흉내)는 우리 것이 아니다: 보이기 · Quit · 강제 종료 없이
+    그 읽기만 실패한다(분명한 한국어 사유)."""
+    friend = friend_document(tmp_path, app)
+    before = automation_pids()
+    try:
+        action, source = ("read_excel", SAMPLE_XLSX[0]) if app == "excel" else ("read_word", SAMPLE_PDFS[2])
+        with pytest.raises(EngineError) as error:
+            run_engine("office", {"action": action, "path": str(source), "test_preopen": str(friend)})
+        assert FOREIGN[app] in str(error.value)
+        mine = automation_pids() - before
+        assert len(mine) == 1, f"그 인스턴스를 끝내 버림: {sorted(mine)}"
+        assert not window_shown(next(iter(mine))[1], wait=2), "건드리지 말아야 할 인스턴스를 보이게 함"
+        assert is_locked(friend)
+        assert own_temp(temp_dir) == [], "임시 폴더가 남음"
+    finally:
+        kill_new_office(before)
 
 
 @office

@@ -264,6 +264,7 @@ class ExcelHolder:
             assert self.proc.poll() is None, "파일을 여는 엑셀이 먼저 끝남"
             assert time.monotonic() < deadline, "엑셀이 파일을 열지 못함"
             time.sleep(0.2)
+        self.mine = automation_pids() - self.before   # 이 시험용 엑셀
         return self
 
     def __exit__(self, *exc):
@@ -274,7 +275,15 @@ class ExcelHolder:
             self.proc.kill()
             for _, pid in automation_pids() - self.before:
                 subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        wait_office_gone(self.mine)
         return False
+
+
+def wait_office_gone(pids: set, wait: float = 30) -> None:
+    """Quit 한 엑셀은 powershell 이 끝난 뒤에도 몇 초(이 PC 에서 약 3초) 더 남는다. 사라질 때까지 기다린다(no_leftover 가 잘못 잡지 않게)."""
+    deadline = time.monotonic() + wait
+    while pids & automation_pids() and time.monotonic() < deadline:
+        time.sleep(0.5)
 
 
 @pytest.fixture
@@ -545,6 +554,126 @@ def test_same_po_pdf_and_excel_is_duplicate(tmp_path, clean_temp, no_leftover):
     assert [(r["파일"], r["상태"]) for r in env.records()] == [(r["파일"], r["상태"]) for r in job_run.load_records(job)]
     assert len(sheet_rows(env.out / LEDGER, "PO")) == 1
     assert [(r["파일"], r["결과"], r["사유"]) for r in env.log()][1] == ("ACME_PO_PO-77001_엑셀.xlsx", "중복", "PO PO-77001 이미 처리됨")
+
+
+TABLE_FORM = '''
+회사양식:
+  파일명: "SO_{고객PO번호}.xlsx"
+  시트: SO
+  열:
+    - {이름: PO, 값: 머리.고객PO번호}
+    - {이름: Part, 값: 품목.품번}
+    - {이름: Amount, 값: 품목.금액}
+'''
+
+
+def split_row_po(path: Path, number: str) -> Path:
+    """ACME_PO_PO-77001.pdf 모양인데 첫 품목 줄의 품명이 두 줄로 쪼개진 PDF(워드 변환이 표 행을 쪼갠 경우 흉내).
+    워드로 읽으면 'CP-200 Chiller Pump 1 4,500.00 4,500.00' 다음에 'Assembly' 한 줄이 따로 나온다."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(str(path), pagesize=letter, invariant=1)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(72, 720, "PURCHASE ORDER")
+    c.setFont("Helvetica", 11)
+    c.drawString(72, 690, "ACME Supply Inc.")
+    c.drawString(72, 660, f"PO Number: {number}")
+    c.drawString(72, 645, "Date: 10/15/2026")
+    c.drawString(72, 630, "Bill To: ACME Semiconductor Korea")
+    y = 590
+    c.setFont("Helvetica-Bold", 10)
+    for x, label in [(72, "Item"), (150, "Description")]:
+        c.drawString(x, y, label)
+    for x, label in [(390, "Qty"), (470, "Unit Price"), (540, "Amount")]:
+        c.drawRightString(x, y, label)
+    c.setFont("Helvetica", 10)
+    y -= 18
+    c.drawString(72, y, "CP-200")
+    c.drawString(150, y, "Chiller Pump")
+    for x, value in [(390, "1"), (470, "4,500.00"), (540, "4,500.00")]:
+        c.drawRightString(x, y, value)
+    y -= 12
+    c.drawString(150, y, "Assembly")
+    y -= 18
+    c.drawString(72, y, "HX-900")
+    c.drawString(150, y, "Heat Exchanger")
+    for x, value in [(390, "1"), (470, "7,845.67"), (540, "7,845.67")]:
+        c.drawRightString(x, y, value)
+    y -= 30
+    c.drawString(390, y, "Subtotal: 12,345.67")
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(390, y - 18, "Total: $12,345.67")
+    c.showPage()
+    c.save()
+    t = time.time() - 120
+    os.utime(path, (t, t))
+    return path
+
+
+@office
+@pytest.mark.office
+def test_unreadable_item_table_goes_to_review(tmp_path, clean_temp, no_leftover):
+    """규칙에 품목 표가 있는데 읽지 못하면(워드가 첫 품목 줄을 둘로 쪼갬 · 엑셀 금액 칸이 숫자가 아님) 「성공」 이 아니라 확인필요.
+    회사 양식 · 장부 줄이 생기지 않는다. 같은 실행의 정상 PDF 는 그대로 성공(시험 자료가 맞는지)."""
+    env = Env(tmp_path, "둘다", without_master(PO_RULES) + TABLE_FORM)
+    drop(fixture_pdfs(tmp_path) / "ACME_PO_PO-77001.pdf", env.inp)
+    split = split_row_po(env.inp / "PO 쪼갠줄 PO-77002.pdf", "PO-77002")
+    bad = excel_po(env.inp / "PO 금액칸 글자 PO-77003.xlsx", number="PO-77003")
+    book = openpyxl.load_workbook(bad)
+    book.active["E7"] = "N/A"   # 첫 품목 금액 칸이 숫자가 아님 → 엑셀 품목 표를 통째로 버림
+    book.save(bad)
+    t = time.time() - 120
+    os.utime(bad, (t, t))
+
+    report = run_portable(env)
+
+    assert counts(report) == {"성공": 1, "중복": 0, "확인필요": 2, "보류": 0}
+    states = {r["파일"]: r["상태"] for r in env.records()}
+    assert states == {"ACME_PO_PO-77001.pdf": "성공", split.name: "확인필요", bad.name: "확인필요"}
+    note = env.note(split.name).read_text(encoding="utf-8").split("\n")
+    assert note[1] == "사유: 품목 표를 읽지 못함: 표 행패턴과 맞지 않는 줄이 있어 품목 건너뜀: Assembly"
+    note = env.note(bad.name).read_text(encoding="utf-8").split("\n")
+    assert note[1] == "사유: 품목 표를 읽지 못함: 품목 7행 '금액' 값이 숫자가 아님, 품목 건너뜀"
+    assert sorted(f for f in files(env.out) if f.endswith(".xlsx") and f.startswith("SO_")) == ["SO_PO-77001.xlsx"]
+    assert [r["고객PO번호"] for r in sheet_rows(env.out / LEDGER, "PO")] == ["PO-77001"]
+    assert {r["문서번호"] for r in sheet_rows(env.out / LEDGER, "품목")} == {"PO-77001"}
+
+
+@office
+@pytest.mark.office
+def test_rules_without_table_still_succeed(tmp_path, clean_temp, no_leftover):
+    """규칙에 품목 표가 없는 문서종류는 그대로 성공(품목 없이 머리만 장부에). 표 검사는 표가 정의된 문서에만 건다."""
+    text = re.sub(r"\n    표:\n(?:      .*\n)+", "\n", without_master(PO_RULES))
+    assert "행패턴" not in text.split("엑셀양식:")[0]
+    env = Env(tmp_path, "누적장부", text)
+    split = split_row_po(env.inp / "PO 쪼갠줄 PO-77002.pdf", "PO-77002")
+
+    report = run_portable(env)
+
+    assert counts(report)["성공"] == 1, report
+    assert [r["상태"] for r in env.records()] == ["성공"]
+    assert [r["고객PO번호"] for r in sheet_rows(env.out / LEDGER, "PO")] == ["PO-77002"]
+    assert split.exists()
+
+
+@office
+@pytest.mark.office
+def test_long_name_keeps_original_name(tmp_path, clean_temp, no_leftover):
+    """이름이 긴(입력 폴더 경로까지 200자쯤) 엑셀 PO: 오피스는 짧은 이름의 복사본(원본.xlsx)을 열지만, 처리기록 · 처리로그 ·
+    장부의 원본파일에는 원래 이름이 들어간다."""
+    env = Env(tmp_path, "누적장부", without_master(PO_RULES))
+    room = 200 - len(str(env.inp)) - 1 - len(".xlsx")
+    name = ("메일_Order 긴 이름 PO-77001 " + "가나다 ABC " * 40)[:room].rstrip() + ".xlsx"
+    path = excel_po(env.inp / name)
+    assert len(str(path)) >= 195
+
+    report = run_portable(env)
+
+    assert counts(report)["성공"] == 1, report
+    assert [(r["파일"], r["상태"]) for r in env.records()] == [(name, "성공")]
+    assert [r["파일"] for r in env.log()] == [name]
+    assert [r["원본파일"] for r in sheet_rows(env.out / LEDGER, "PO")] == [name]
 
 
 @office

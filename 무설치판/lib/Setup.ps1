@@ -384,7 +384,7 @@ function Invoke-SelfTest([string]$BundleDir) {
     } else {
         try {
             $part = Test-SelfTestPart 'PDF' $answer.pdf.result {
-                ConvertTo-ResultJson (Get-TextExtract $rules ([string](Read-WordText $pdf $script:OfficeTimeoutSec '자체시험').text))
+                ConvertTo-ResultJson (Get-TextExtract $rules ([string](Read-WordText $pdf $script:OfficeTimeoutSec).text))
             }
             $out.pdf_ok = $part.ok
             if (-not $part.ok) { $messages.Add($script:PdfDifferent); $details.Add($part.difference) }
@@ -394,7 +394,7 @@ function Invoke-SelfTest([string]$BundleDir) {
     }
     try {
         $part = Test-SelfTestPart '엑셀' $answer.excel.result {
-            ConvertTo-ResultJson (Get-GridExtract $rules (Read-ExcelGrid $xlsx $script:OfficeTimeoutSec '자체시험'))
+            ConvertTo-ResultJson (Get-GridExtract $rules (Read-ExcelGrid $xlsx $script:OfficeTimeoutSec))
         }
         $out.excel_ok = $part.ok
         if (-not $part.ok) { $messages.Add($script:ExcelDifferent); $details.Add($part.difference) }
@@ -616,10 +616,12 @@ function Invoke-Setup([string]$BundleDir, [string]$Work, [scriptblock]$FolderPic
                 $code = 1
                 continue
             }
+            $copied = $false
             try {
                 $job = Get-SetupJob $target $Work
                 $oldTitle = $job.title
                 Copy-JobRules $source $target
+                $copied = $true
                 Save-JobSettingsValues $job ([ordered]@{ title = $title; output_mode = $mode })
                 $job.title = $title
                 $job.output_mode = $mode
@@ -628,6 +630,9 @@ function Invoke-Setup([string]$BundleDir, [string]$Work, [scriptblock]$FolderPic
             } catch {
                 Write-SetupLine "${name}: 바꾸지 못했습니다 ($($_.Exception.Message)). 대표에게 알려 주세요."
                 $code = 1
+                # 새 규칙을 아직 옮기지 못했으면 아래 「남은 폴더 치우기」 를 건너뛴다: 작업 폴더 = 묶음 폴더일 때 제목이 바뀐 새 묶음 폴더가
+                # 새 규칙의 유일한 사본이라 지우면 안 된다(다음 준비가 다시 옮긴다). 옮긴 뒤의 실패면 치워도 된다(규칙은 이미 작업 폴더에 있음).
+                if (-not $copied) { continue }
             } finally {
                 Exit-JobLock $lock
             }
@@ -725,11 +730,11 @@ function Invoke-CheckCommand([string]$Path, [string]$RulesPath) {
     $rules = Import-PortableRules $RulesPath
     $head = $null
     if ($suffix -eq '.xlsx') {
-        $grid = Read-ExcelGrid $Path $script:OfficeTimeoutSec '점검'
+        $grid = Read-ExcelGrid $Path $script:OfficeTimeoutSec
         $result = Get-GridExtract $rules $grid
         $source = @{ kind = 'grid'; grid = $grid }
     } else {
-        $text = [string](Read-WordText $Path $script:OfficeTimeoutSec '점검').text
+        $text = [string](Read-WordText $Path $script:OfficeTimeoutSec).text
         $result = Get-TextExtract $rules $text
         $source = @{ kind = 'text'; text = $text }
         $head = [string]::Join("`n", @(Split-TextLines $text | Select-Object -First 30))
@@ -775,6 +780,8 @@ function Invoke-CheckCommand([string]$Path, [string]$RulesPath) {
     }
     foreach ($w in $result.warnings) { if (-not $w.Contains("' 못 찾음") -and -not $w.Contains("' 값 ")) { & $say "경고: $w" } }
     if ($null -ne $result.review_reason) { & $say "`n확인필요: $($result.review_reason)"; return 0 }
+    $tableProblem = Get-TableProblem $rules $result   # 실행과 같은 판정: 규칙에 품목 표가 있는데 읽지 못하면 확인필요
+    if ($null -ne $tableProblem) { & $say "`n확인필요: $tableProblem"; return 0 }
     $bad = Write-CheckTable $result $source $rules
     if ($bad) { & $say "`n확인필요: 검산 불일치 ${bad}건. 이대로 실행하면 이 문서는 결과를 내지 않고 확인필요로 갑니다." }
     $company = $null

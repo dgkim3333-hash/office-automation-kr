@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 친구 PC 쪽 코드(`무설치판\`)는 **Windows PowerShell 5.1** 문법만. PowerShell 7 전용(`&&` · `||` · `?:` · `??` · `-Parallel` · `ConvertFrom-Json -AsHashtable` 등) 금지. 시험은 늘 `powershell.exe`(5.1)로 돌린다.
-- `무설치판\` 의 모든 `.ps1` · `.bat` 은 UTF-8 **BOM** 으로 저장(5.1 이 한글을 읽게). `.bat` 첫 줄 `@echo off` 다음 `chcp 65001 > nul`.
+- `무설치판\` 의 모든 `.ps1` 은 UTF-8 **BOM** 으로 저장(5.1 이 한글을 읽게). `.bat` 은 BOM **없이** UTF-8 · CRLF, 첫 줄 `@echo off` 다음 `chcp 65001 > nul`(최종 검토 I1: BOM 이 있으면 cmd 가 첫 줄을 명령으로 읽어 오류를 찍고 echo 가 켜짐).
 - 금액 계산은 `[decimal]` 만. `[double]` 로 돈 계산 금지. 숫자 · 날짜 변환은 `[Globalization.CultureInfo]::InvariantCulture`.
 - 엔진 JSON 출력에서 금액은 **문자열**(`"1234.50"` — 원본 자리 수 유지), 날짜는 `"YYYY-MM-DD"`, 정수 수량은 숫자. `ConvertTo-Json` 은 늘 `-Depth 20`.
 - 친구 PC 의 설정 · 레지스트리 · 보안을 바꾸지 않는다(읽기만). 인터넷 연결 · 내려받기 코드 금지(`Invoke-WebRequest` · `Invoke-RestMethod` · `Net.WebClient` · `http://` · `https://` 가 `무설치판\` 에 없어야 함).
@@ -117,7 +117,7 @@ tests\portable\                 (새) conftest.py(마커 · ps 실행 도우미)
   - `test_unmatched_row_goes_to_review`: 표 사이에 행패턴과 안 맞는 줄 하나를 끼운 글자 → `table is None`, 경고에 `표 행패턴과 맞지 않는 줄이 있어 품목 건너뜀` (Review Focus 2).
   - `test_culture_de_de_same_result`: 위 샘플 하나를 `culture="de-DE"` 로 → 기본 문화권 결과와 같다 (Review Focus 1).
   - `test_quantity_must_be_integer`: 수량 `1.5` 인 줄 → 그 줄 불일치(지금 판과 같이 표 전체 None).
-  - `test_ps_files.py::test_bom_and_no_network`: `무설치판\` 의 모든 `.ps1` · `.bat` 이 BOM 으로 시작하고, `Invoke-WebRequest` · `Invoke-RestMethod` · `WebClient` · `http://` · `https://` 가 없다.
+  - `test_ps_files.py::test_bom_and_no_network`: `무설치판\` 의 모든 `.ps1` 이 BOM 으로 시작하고(`.bat` 은 BOM 없음), `Invoke-WebRequest` · `Invoke-RestMethod` · `WebClient` · `http://` · `https://` 가 없다.
   - `test_ps_files.py::test_no_ps7_syntax`: 모든 `.ps1` 을 `powershell.exe` 의 `[System.Management.Automation.Language.Parser]::ParseFile` 로 읽어 오류 0개.
 - [ ] **Step 2: 실패 확인** — `uv run pytest tests/portable -v` → 무설치판 파일 없음으로 FAIL
 - [ ] **Step 3: 구현** — 동작 기준은 `app\extract.py`(`detect_type` 은 `first_page` 없이 전체 글자, 대소문자 무시 포함 검색 · `HEAD_LINES = 30` · 필드는 첫 일치의 1번 괄호 · 표는 시작키워드 줄 다음부터 끝키워드 줄 앞까지, 빈 줄 건너뜀, `row_pattern` 은 줄 처음부터 일치(`match` = .NET 에서 `^` 고정), 금액열 · 수량열 변환). 줄 나누기는 `\r?\n`.

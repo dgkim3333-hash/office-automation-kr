@@ -85,8 +85,10 @@ def test_chapter_09_explains_rulings():
     # 마크업지문 = 마크업표 파일 전체 지문(지금 판과 뜻이 다름)
     at = text.index("마크업지문")
     assert "지금 판" in text[at:at + 600] and "마크업표" in text[at:at + 600]
-    # 실행 중 숨은 엑셀에 xlsx 가 열릴 수 있음
+    # 실행 중 숨은 엑셀에 xlsx 가 열릴 수 있음 → 그 엑셀은 끝내지 않고 화면에 보이게 넘겨 준다(최종 검토 I3), 시간 초과면 닫힐 수 있음
     assert "숨은 엑셀" in text
+    at = text.index("숨은 엑셀")
+    assert "화면에 보이게 넘겨" in text[at:at + 900] and "시간 초과" in text[at:at + 900]
     # 제목을 바꾸면 새 누적장부, 옛 장부는 그대로
     assert "새 누적장부" in text and "옛 누적장부" in text
     # bundle-portable: --작업 없으면 멈추지 않은 작업만, 새 빈 폴더, 실패하면 지우고 새 폴더
@@ -122,6 +124,8 @@ def test_chapter_99_portable_section():
     section = _section(text, "무설치판")
     assert "09_무설치판.md" in section
     assert _ps_string("Office.ps1", "WordTimeoutText") in section  # 「워드가 응답하지 않음」
+    assert "숨은 엑셀에 이 프로그램이 열지 않은 통합 문서" in section   # 넘겨 준 기록(Office.ps1 OfficeLeftText)
+    assert "새로 띄운 엑셀에 이미 다른 통합 문서가 열려 있어" in section   # 우리 것이 아닌 엑셀(OfficeForeignText)
     assert "다르게 읽습니다" in section
     assert "스크립트" in section
     it = _section(text, "IT 담당자")

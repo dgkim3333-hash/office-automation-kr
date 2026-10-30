@@ -458,6 +458,28 @@ function Get-TotalChecks($Model, $Spec, $Checks) {
 
 # ---- 입구 --------------------------------------------------------------------------------------------
 
+$script:TableUnreadPrefix = '품목 표를 읽지 못함: '
+$script:TableSkipMark = '품목 건너뜀'
+
+function Get-TableProblem($Rules, $Result) {
+    # 규칙에 품목 표(PDF: 문서종류의 표, 엑셀: 엑셀양식의 품목)가 있는데 결과에 품목이 없으면(표를 버렸거나 0줄) 확인필요 사유,
+    # 아니면 $null. 표 줄이 하나라도 어긋나면 엔진은 표를 통째로 버리므로, 이것을 거르지 않으면 품목 없는 결과가 「성공」 으로 나간다.
+    # 규칙에 표가 없는 문서종류는 늘 $null(머리만 쓰는 작업은 그대로).
+    $defined = $false
+    if ($Result.is_excel) {
+        $form = @($Rules.excel_forms) | Where-Object { $null -ne $_ -and $_.name -ceq [string]$Result.form } | Select-Object -First 1
+        $defined = ($null -ne $form -and $null -ne $form.items)
+    } else {
+        $doc = @($Rules.doc_types) | Where-Object { $_.name -ceq [string]$Result.doc_type } | Select-Object -First 1
+        $defined = ($null -ne $doc -and $null -ne $doc.table)
+    }
+    if (-not $defined) { return $null }
+    if ($null -ne $Result.table -and $Result.table.Count -gt 0) { return $null }   # @(...) 는 5.1 에서 List 를 감싸다 오류가 난다
+    $why = @($Result.warnings | Where-Object { ([string]$_).Contains($script:TableSkipMark) })
+    if ($why.Count -eq 0) { return $script:TableUnreadPrefix + '품목이 한 줄도 없음' }
+    return $script:TableUnreadPrefix + [string]::Join('; ', [string[]]$why)
+}
+
 function Get-Checks($Result, $Source, $Rules) {
     # 결과 하나를 원본과 대조한 검산 목록(List). 순서: 원문 대조 · 소수 자리 → 줄 검산 → 합계 검산.
     #   $Result: Get-TextExtract / Get-GridExtract 가 만든 객체 또는 그 JSON(ConvertFrom-Json)

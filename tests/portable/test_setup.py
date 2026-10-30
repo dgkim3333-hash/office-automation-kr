@@ -26,9 +26,9 @@ from app.markup import EXAMPLE_ROWS, load_markup
 from app.portable import SELF_TEST_ANSWER, SELF_TEST_DIR, SELF_TEST_RULES, build_self_test, rules_to_portable
 from app.rules import rules_from_text
 
-from .conftest import DISPATCHER, REPO, decode_output, example_rules
+from .conftest import DISPATCHER, REPO, decode_output, example_rules, without_master
 from .test_office_read import no_leftover, office, temp_dir  # noqa: F401 (픽스처)
-from .test_run import ACME, INVOICE, Env, clean_temp, drop, example_text, files  # noqa: F401 (픽스처)
+from .test_run import ACME, INVOICE, PO_RULES, Env, clean_temp, drop, example_text, files, split_row_po  # noqa: F401 (픽스처)
 
 PORTABLE = REPO / "무설치판"
 RUN_BAT = PORTABLE / "지금실행.bat"
@@ -245,18 +245,51 @@ def test_office_version_not_fixed():
 
 
 def test_bat_files():
-    """준비.bat · 지금실행.bat: UTF-8 BOM, chcp 65001, 같은 폴더의 무설치판.ps1 을 부른다."""
+    """준비.bat · 지금실행.bat: BOM 없이 첫 줄 @echo off, 다음 chcp 65001, 같은 폴더의 무설치판.ps1 을 부른다.
+    (BOM 이 있으면 cmd 가 첫 줄을 「'BOM@echo'은(는) … 배치 파일이 아닙니다」 로 실패하고 echo 가 켜진 채 남는다.)"""
     setup = SETUP_BAT.read_bytes()
-    assert setup.startswith(b"\xef\xbb\xbf")
-    text = setup.decode("utf-8-sig")
+    text = setup.decode("utf-8")
     assert text.splitlines()[:2] == ["@echo off", "chcp 65001 > nul"]
     assert 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0무설치판.ps1" -Command 준비' in text
-    run = RUN_BAT.read_bytes().decode("utf-8-sig")
+    run = RUN_BAT.read_bytes().decode("utf-8")
     assert '-Command 실행 -Job %1 %2 %3' in run
-    for bat in PORTABLE.rglob("*.bat"):   # 작업 트리의 바이트 그대로(묶음은 이 파일들을 복사한다): BOM + 줄끝 모두 CRLF
+    bats = list(PORTABLE.rglob("*.bat"))
+    assert sorted(b.name for b in bats) == ["준비.bat", "지금실행.bat"]
+    for bat in bats:   # 작업 트리의 바이트 그대로(묶음은 이 파일들을 복사한다): BOM 없음 · 첫 줄 @echo off · 줄끝 모두 CRLF
         data = bat.read_bytes()
-        assert data.startswith(b"\xef\xbb\xbf") and data.endswith(b"\r\n"), bat.name
+        assert data.startswith(b"@echo off\r\n") and data.endswith(b"\r\n"), bat.name
         assert data.count(b"\n") == data.count(b"\r\n"), f"LF 만 있는 줄: {bat.name}"
+
+
+FAKE_DISPATCHER = """\
+param([string]$Command, [string]$Job)
+$out = Join-Path $PSScriptRoot '받음.json'
+$data = [ordered]@{ root = $PSScriptRoot; command = $Command; job = $Job }
+[IO.File]::WriteAllText($out, (ConvertTo-Json -InputObject $data -Depth 20), (New-Object Text.UTF8Encoding $false))
+"""
+
+
+@pytest.mark.parametrize("bat, args, command", [(SETUP_BAT, [], "준비"), (RUN_BAT, ["01"], "실행")],
+                         ids=["setup", "run"])
+def test_bat_runs_in_korean_folder(bat, args, command, tmp_path):
+    """진짜 .bat 바이트를 한글 · 띄어쓰기 폴더에 복사해 cmd 로 돌린다. 옆의 무설치판.ps1 은 받은 것만 적는 가짜라
+    예약 등록 · 바탕화면 · 폴더 고르기는 일어나지 않는다. 첫 줄 오류 · 명령 되풀이(echo) 없이 %~dp0 가 한글 경로로 풀린다."""
+    folder = tmp_path / "무설치 묶음 폴더" / "무설치판"
+    folder.mkdir(parents=True)
+    shutil.copyfile(bat, folder / bat.name)
+    (folder / "무설치판.ps1").write_bytes(b"\xef\xbb\xbf" + FAKE_DISPATCHER.encode("utf-8"))
+
+    # 전체 경로로 부른다(NoDefaultCurrentDirectoryInExePath 가 켜진 환경에서는 cmd 가 현재 폴더의 이름만으로 찾지 않음)
+    done = subprocess.run(["cmd.exe", "/c", str(folder / bat.name), *args], cwd=folder, input=b"\r\n",
+                          capture_output=True, timeout=120)
+
+    raw = done.stdout + done.stderr
+    shown = raw.decode("utf-8", errors="replace") + raw.decode("mbcs", errors="replace")
+    assert b"@echo" not in raw and "배치 파일이 아닙니다" not in shown, shown
+    assert b"chcp" not in raw and b"powershell.exe" not in raw, shown   # echo off: 명령 줄이 화면에 찍히지 않음
+    got = json.loads((folder / "받음.json").read_text(encoding="utf-8"))
+    assert got["root"] == str(folder)
+    assert got["command"] == command and got["job"] == ("01" if args else "")
 
 
 # --- 놓친 실행 · 자동 실행 실패 알림 (오피스 없이: 입력 폴더가 비어 있음) ---
@@ -509,6 +542,38 @@ def test_setup_renamed_job_keeps_one_folder(layout, tmp_path):
     assert code == 0, text
 
 
+def test_setup_update_failure_keeps_new_bundle(tmp_path):
+    """작업 폴더 = 묶음 폴더에서 제목이 바뀐 새 묶음으로 다시 준비하는데 기존 작업 갱신이 실패하면(작업설정.json 이 깨짐),
+    새 묶음 폴더(새 규칙의 유일한 사본)를 치우지 않고 「넣었습니다」 같은 거짓 줄도 찍지 않는다. 고친 뒤 다시 준비하면 새 규칙이 들어간다."""
+    bundle, _, inp, out = _setup_dirs(tmp_path)
+    work = bundle
+    (work / "마크업표.xlsx").write_bytes(b"x")
+    old = make_bundle(bundle, example_text(), title="옛 제목")
+    code, text = run_setup(bundle, work, write_hooks(tmp_path, pick=[str(inp), str(out)], schedule="ok"))
+    assert code == 0, text
+    folder = work / "작업" / "01_옛 제목"
+    good = (folder / "작업설정.json").read_bytes()
+    (folder / "작업설정.json").write_text("{ 깨진 json", encoding="utf-8")
+    os.utime(old / "규칙.json", (time.time() - 3600, time.time() - 3600))
+    new = _rename_in_bundle(bundle, example_text(), "9" * 16)
+    new_rules = (new / "규칙.json").read_bytes()
+
+    code, text = run_setup(bundle, work, write_hooks(tmp_path, pick=[], schedule="ok"))
+
+    assert code == 1, text
+    assert "01_옛 제목: 바꾸지 못했습니다" in text
+    assert new.is_dir() and (new / "규칙.json").read_bytes() == new_rules
+    assert "정리:" not in text and "넣었습니다" not in text
+    assert _job_folders(work) == ["01_새 제목", "01_옛 제목"]
+
+    (folder / "작업설정.json").write_bytes(good)   # 고친 뒤 다시 준비 → 새 규칙이 들어가고 새 묶음 폴더는 치워진다
+    code, text = run_setup(bundle, work, write_hooks(tmp_path, pick=[], schedule="ok"))
+    assert code == 0, text
+    assert (folder / "규칙.json").read_bytes() == new_rules
+    assert _job_folders(work) == ["01_옛 제목"]
+    assert "새 규칙은 01_옛 제목 에 넣었습니다" in text
+
+
 def test_rejects_onedrive_folder(tmp_path):
     """고른 폴더가 OneDrive 아래 → 지금 판 check_work_dir 와 같은 거부 문구, 다시 고르게 하고, 취소하면 준비를 멈춘다."""
     bundle, work, _, _ = _setup_dirs(tmp_path)
@@ -644,6 +709,22 @@ def test_check_command_matches_python_check(source, tmp_path, clean_temp, no_lef
     assert got[:cut] == expected[:cut]
     assert "| 검산 | 원본 | 결과 | 일치 |" in got and "|---|---|---|---|" in got
     assert expected[-1].startswith("회사 양식: ") and got[-1] == expected[-1]
+
+
+@pytest.mark.office
+def test_check_command_unreadable_table_is_review(tmp_path, clean_temp, no_leftover):
+    """점검도 실행과 같게: 규칙에 품목 표가 있는데 줄이 어긋나 표를 버리면 「확인필요: 품목 표를 읽지 못함: <경고>」 로 끝난다."""
+    path = split_row_po(tmp_path / "쪼갠줄.pdf", "PO-77002")
+    rules_json = tmp_path / "규칙.json"
+    rules_json.write_text(json.dumps(rules_to_portable(rules_from_text(without_master(PO_RULES))), ensure_ascii=False),
+                          encoding="utf-8")
+
+    code, text = powershell("-Command", "점검", "-File", str(path), "-Rules", str(rules_json))
+
+    assert code == 0, text
+    assert "품목 표: 읽지 못함 (아래 경고 참고)" in text
+    assert text.splitlines()[-1] == "확인필요: 품목 표를 읽지 못함: 표 행패턴과 맞지 않는 줄이 있어 품목 건너뜀: Assembly"
+    assert "| 검산 | 원본 | 결과 | 일치 |" not in text
 
 
 @office

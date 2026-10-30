@@ -25,7 +25,8 @@ from app.verify import verify
 from .conftest import REPO, EngineError, example_rules
 from .grid import grid_from_xlsx
 from .test_engine_company import cell, result_json, sample_markup
-from .test_office_read import automation_pids, no_leftover, office, own_temp, temp_dir  # noqa: F401 (픽스처)
+from .test_office_read import (automation_pids, friend_document, is_locked, kill_new_office, no_leftover,  # noqa: F401 (픽스처)
+                               office, own_temp, temp_dir, window_shown)
 
 PDFS = REPO / "samples" / "03_Invoice_DM_PDF"
 INVOICE = PDFS / "INV-2026-10231.pdf"
@@ -88,6 +89,7 @@ def write(run_engine, action: str, culture=None, **payload) -> dict:
     """op office_write. 이 실행이 띄운 엑셀이 Quit 뒤 스스로 끝났는지(강제로 끝낸 것 0개)도 본다."""
     out = run_engine("office_write", {"action": action, **payload}, culture)
     assert out.pop("forced") == 0, "Quit 한 엑셀이 스스로 끝나지 않아 강제로 끝냄(COM 참조가 남음)"
+    assert out.pop("left", None) is None, "남의 문서가 없는데 엑셀을 넘겨 줌"
     return out
 
 
@@ -378,6 +380,30 @@ def test_check_file_same_as_python(tmp_path, clean_temp, run_engine, no_leftover
 
 @office
 @pytest.mark.office
+def test_writer_hands_over_friends_workbook(tmp_path, clean_temp, run_engine, no_leftover):
+    """쓰기 · 다시 읽기 엑셀에도 같은 보호: 친구가 연 통합 문서가 우리 숨은 엑셀에 들어오면 우리 문서만 닫고 Quit 하지 않는다."""
+    book = tmp_path / "다시읽기.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "S"
+    wb.active["A1"], wb.active["A2"] = "이름", "값"
+    wb.save(book)
+    friend = friend_document(tmp_path, "excel")
+    before = automation_pids()
+    try:
+        out = run_engine("office_write", {"action": "read_back", "path": str(book), "sheet": "S", "header": ["이름"],
+                                          "rows": [[cell("값")]], "test_extra": str(friend)})
+        assert out["problems"] == []
+        mine = automation_pids() - before
+        assert len(mine) == 1, f"우리 엑셀이 끝나 버림(친구 문서도 함께 닫힘): {sorted(mine)}"
+        assert is_locked(friend) and window_shown(next(iter(mine))[1])
+        assert out["left"].startswith("참고: 숨은 엑셀에 이 프로그램이 열지 않은 통합 문서(친구 문서.xlsx)")
+        assert own_temp(clean_temp) == []
+    finally:
+        kill_new_office(before)
+
+
+@office
+@pytest.mark.office
 def test_read_back_detects_change(tmp_path, clean_temp, run_engine, no_leftover):
     """저장 뒤 칸 하나를 바꾸면 Test-ReadBack 이 그 칸을 알려 준다. 문구는 지금 판 read_back 과 같다."""
     rules = example_rules()
@@ -537,7 +563,7 @@ def test_company_form_exact_name(tmp_path, clean_temp, run_engine, no_leftover):
 @office
 @pytest.mark.office
 def test_ledger_opened_from_copy(tmp_path, clean_temp, run_engine, no_leftover):
-    """있던 장부는 엑셀이 원본이 아니라 임시 복사본(%TEMP%\무설치판_*\같은 이름)을 연다. 복사본 폴더는 끝나면 지운다."""
+    """있던 장부는 엑셀이 원본이 아니라 임시 복사본(%TEMP%\무설치판_*\원본.xlsx)을 연다. 복사본 폴더는 끝나면 지운다."""
     rules = example_rules()
     docs = documents(rules)
     book = tmp_path / "누적장부.xlsx"
@@ -548,7 +574,7 @@ def test_ledger_opened_from_copy(tmp_path, clean_temp, run_engine, no_leftover):
                    source=docs[1][1], when=_iso(WHEN[1]), organized=docs[1][2])
     opened = Path(second["opened"])
     assert second["saved"] is True
-    assert opened.name == book.name and opened.parent.parent == clean_temp and opened.parent.name.startswith("무설치판_")
+    assert opened.name == "원본.xlsx" and opened.parent.parent == clean_temp and opened.parent.name.startswith("무설치판_")
 
 
 HOLDER = r"""
@@ -614,6 +640,9 @@ def test_locked_ledger(tmp_path, clean_temp, run_engine, no_leftover):
             holder.kill()
             for name, pid in automation_pids() - before:
                 subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        deadline = time.monotonic() + 30   # Quit 한 엑셀은 powershell 이 끝난 뒤에도 몇 초 더 남는다(no_leftover 가 잘못 잡지 않게)
+        while automation_pids() - before and time.monotonic() < deadline:
+            time.sleep(0.5)
     assert book.read_bytes() == data and book.stat().st_mtime_ns == stamp
     assert not book.with_name("누적장부.bak.xlsx").exists()
     assert sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".xlsx") == ["누적장부.xlsx"]

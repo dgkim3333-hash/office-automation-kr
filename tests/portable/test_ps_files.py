@@ -25,11 +25,16 @@ def _files(*suffixes):
 
 
 def test_bom_and_no_network():
+    """.ps1 은 UTF-8 BOM(5.1 이 한글을 읽게), .bat 은 BOM 없이(있으면 cmd 가 첫 줄을 'BOM+@echo' 라는 명령으로 읽어
+    오류를 찍고 echo 가 켜진 채 남는다). 둘 다 인터넷 코드 없음."""
     files = _files(".ps1", ".bat")
     assert files, "무설치판 파일이 없음"
     for path in files:
         data = path.read_bytes()
-        assert data.startswith(BOM), f"BOM 없음: {path.name}"
+        if path.suffix.lower() == ".bat":
+            assert not data.startswith(BOM), f".bat 에 BOM 이 있음: {path.name}"
+        else:
+            assert data.startswith(BOM), f"BOM 없음: {path.name}"
         found = NETWORK.search(data.decode("utf-8-sig"))
         assert found is None, f"인터넷 코드 '{found.group(0)}' 가 있음: {path.name}"
 

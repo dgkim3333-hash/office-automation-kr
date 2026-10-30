@@ -286,7 +286,7 @@ def test_bundle_layout(bundle_env):
 
 
 def test_bundle_copies_portable_code_bytes(bundle_env):
-    """무설치판\\ 의 .ps1 · .bat 은 바이트 그대로(UTF-8 BOM, .bat 은 CRLF) 들어간다. 저장소 진짜 파일과 견준다."""
+    """무설치판\\ 의 .ps1 · .bat 은 바이트 그대로(.ps1 은 UTF-8 BOM, .bat 은 BOM 없이 CRLF) 들어간다. 저장소 진짜 파일과 견준다."""
     repo, work, tmp_path = bundle_env
     _new_job(repo, tmp_path, "시험 작업", "누적장부", _without_master(_example_text()))
     out = tmp_path / "묶음"
@@ -298,9 +298,11 @@ def test_bundle_copies_portable_code_bytes(bundle_env):
     for name in names:
         data = (out / name).read_bytes()
         assert data == (REPO / name).read_bytes(), name
-        assert data.startswith(b"\xef\xbb\xbf"), name
         if name.endswith(".bat"):
+            assert data.startswith(b"@echo off\r\n"), name
             assert data.count(b"\n") == data.count(b"\r\n") > 0, name
+        else:
+            assert data.startswith(b"\xef\xbb\xbf"), name
 
 
 def test_bundle_rules_written_fresh(bundle_env):

@@ -96,24 +96,28 @@ function Test-PdfWarningOff {
 
 # ---- 임시 복사본 --------------------------------------------------------------------------------
 
-function New-OfficeTempFolder([string]$Job) {
-    # 새 임시 폴더 %TEMP%\무설치판_<작업>_<날짜시각>_<임의>\ 를 만들어 경로를 돌려준다(작업 이름의 파일 이름에 못 쓰는 글자는 _). 지우기는 Remove-OfficeCopy.
+$script:OfficeCopyStem = '원본'   # 복사본 파일 이름(확장자는 원본 그대로). 원본 이름은 결과 · 기록에 쓰지 않으므로 필요 없다
+
+function New-OfficeTempFolder {
+    # 새 임시 폴더 %TEMP%\무설치판_<임의 8자>\ 를 만들어 경로를 돌려준다. 지우기는 Remove-OfficeCopy.
+    # 이름을 짧게 둔다: 오피스가 여는 경로 = 이 폴더 + 짧은 파일 이름이라, 원본 이름이 길어도 엑셀(전체 경로 218자) ·
+    # 워드(MAX_PATH) 한도에 걸리지 않는다(최종 검토 I4). 앞의 「무설치판_」 은 이 프로그램의 임시 폴더 표시(시험이 이것으로 찾음).
     $base = $env:TEMP
     if ([string]::IsNullOrEmpty($base)) { $base = [IO.Path]::GetTempPath() }
-    $safe = $Job
-    foreach ($c in [IO.Path]::GetInvalidFileNameChars()) { $safe = $safe.Replace([string]$c, '_') }
-    $random = [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $folder = Join-Path $base ('무설치판_{0}_{1}_{2}' -f $safe, (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture), $random)
+    do {
+        $folder = Join-Path $base ('무설치판_' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    } while ([IO.Directory]::Exists($folder) -or [IO.File]::Exists($folder))
     [void][IO.Directory]::CreateDirectory($folder)
     return $folder
 }
 
-function New-OfficeCopy([string]$Path, [string]$Job) {
-    # %TEMP%\무설치판_<작업>_<날짜시각>_<임의>\ 에 복사본을 만든다(이름은 그대로). 복사본의 인터넷 표시(Zone.Identifier)만 지운다.
+function New-OfficeCopy([string]$Path) {
+    # %TEMP%\무설치판_<임의>\원본<확장자> 에 복사본을 만든다(확장자는 그대로 · 이름은 짧게). 복사본의 인터넷 표시(Zone.Identifier)만 지운다.
+    # 복사본 이름은 오피스가 여는 데만 쓴다. 처리기록 · 확인필요 .txt · 장부의 원본파일은 늘 원래 파일 이름을 쓴다(부르는 쪽).
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "파일이 없습니다: $Path" }
     $source = (Resolve-Path -LiteralPath $Path).ProviderPath   # .NET 복사는 PowerShell 의 현재 폴더를 모른다
-    $folder = New-OfficeTempFolder $Job
-    $copy = Join-Path $folder ([IO.Path]::GetFileName($source))
+    $folder = New-OfficeTempFolder
+    $copy = Join-Path $folder ($script:OfficeCopyStem + [IO.Path]::GetExtension($source))
     try {
         [IO.File]::Copy($source, $copy)
         Unblock-File -LiteralPath $copy -ErrorAction Stop
@@ -135,6 +139,83 @@ function Remove-OfficeCopy($Copy) {
     }
 }
 
+# ---- 남의 문서 보호(최종 검토 I3) ------------------------------------------------------------------
+# New-Object -ComObject 가 사용자가 띄운 오피스에 붙는지는 [검증필요]이고, 숨은 엑셀이 도는 중에 친구가 xlsx 를 두 번 클릭하면
+# 그 파일이 우리 인스턴스로 열릴 수 있다. 그래서 오피스 일은 아래 함수를 쓴다(오피스 설정은 바꾸지 않는다):
+#   Assert-OfficeFresh: 만든 직후 열린 문서가 있으면 우리 것이 아니다 → 아무것도 건드리지 않고(Visible · Quit · 강제 종료 없음) 오류.
+#   Exit-OfficeApp    : 우리가 연 문서(전체 경로)만 닫고, 남의 문서가 남아 있으면 Quit 하지 않고 화면에 보이게 넘겨 준다.
+# 오피스 일은 따로 도는 runspace 라 이 파일의 함수를 못 쓰므로, 글자로 그 runspace 에 심는다($OfficeBox = 바깥과 주고받는 표).
+# 시간 초과 때 강제로 끝내는 길(Stop-OwnOffice)은 그대로다.
+$script:OfficeForeignText = @{
+    excel = '새로 띄운 엑셀에 이미 다른 통합 문서가 열려 있어(사용자가 연 엑셀일 수 있음) 손대지 않았습니다. 엑셀 창을 모두 닫은 뒤 다시 실행하세요.'
+    word  = '새로 띄운 워드에 이미 다른 문서가 열려 있어(사용자가 연 워드일 수 있음) 손대지 않았습니다. 워드 창을 모두 닫은 뒤 다시 실행하세요.'
+}
+$script:OfficeLeftText = @{
+    excel = '참고: 숨은 엑셀에 이 프로그램이 열지 않은 통합 문서({0})가 열려 있어 엑셀을 끝내지 않고 화면에 보이게 넘겼습니다(저장은 직접 하세요).'
+    word  = '참고: 숨은 워드에 이 프로그램이 열지 않은 문서({0})가 열려 있어 워드를 끝내지 않고 화면에 보이게 넘겼습니다(저장은 직접 하세요).'
+}
+$script:OfficeHandovers = New-Object System.Collections.Generic.List[string]   # 넘겨 준 기록(실행이 실행기록에 옮겨 적고 비움)
+$script:OfficeTestHooks = $null      # 시험용(엔진 op 만): @{ preopen = 만든 직후 열 파일; extra = 우리 문서를 연 뒤 열 파일(두 번 클릭 흉내) }
+
+$script:OfficeGuard = @'
+function global:Get-OfficeDocs($App, [string]$Kind) {
+    if ($Kind -ceq 'excel') { return ,$App.Workbooks }
+    return ,$App.Documents
+}
+function global:Open-OfficeTestFile($App, [string]$Kind, [string]$Path) {
+    # 시험용: 사용자가 같은 인스턴스에서 파일을 연 것처럼(읽기 전용 아님)
+    if ([string]::IsNullOrEmpty($Path)) { return }
+    if ($Kind -ceq 'excel') { [void]$App.Workbooks.Open($Path) } else { [void]$App.Documents.Open($Path) }
+}
+function global:Assert-OfficeFresh($App, [string]$Kind) {
+    Open-OfficeTestFile $App $Kind ([string]$OfficeBox.test_preopen)
+    if ([int](Get-OfficeDocs $App $Kind).Count -ne 0) {
+        $OfficeBox.foreign = $true
+        throw [string]$OfficeBox.foreign_text
+    }
+}
+function global:Invoke-OfficeTestExtra($App, [string]$Kind) {
+    Open-OfficeTestFile $App $Kind ([string]$OfficeBox.test_extra)
+}
+function global:Exit-OfficeApp($App, [string]$Kind, $Mine) {
+    # 우리 문서(전체 경로가 $Mine 에 있음)만 저장 없이 닫는다. 남은 문서가 있으면 Quit 하지 않고 사용자에게 넘긴다.
+    if ($null -eq $App -or $OfficeBox.foreign) { return }
+    $others = New-Object System.Collections.Generic.List[string]
+    # 먼저 목록을 떠 둔다(닫으면서 컬렉션이 바뀌므로). Get-OfficeDocs 는 컬렉션 자체를 돌려주므로 foreach 로 풀어 담는다
+    $docs = New-Object System.Collections.Generic.List[object]
+    try { foreach ($d in (Get-OfficeDocs $App $Kind)) { $docs.Add($d) } } catch { }
+    foreach ($d in $docs) {
+        $full = ''
+        try { $full = [string]$d.FullName } catch { }
+        if (@($Mine) -contains $full) {
+            if ($Kind -ceq 'excel') { try { $d.Close($false) } catch { } } else { try { $d.Close([ref]0) } catch { } }
+        } else {
+            $name = $full
+            try { $name = [string]$d.Name } catch { }
+            $others.Add($name)
+        }
+    }
+    if ($others.Count -gt 0) {
+        $OfficeBox.left = [string]::Join(', ', $others.ToArray())
+        # 화면에 보이게 하고 사용자에게 넘긴다(이 인스턴스에만 걸어 둔 화면 갱신 끔 · 알림 끔 · 매크로 끔을 보통 상태로 되돌림)
+        if ($Kind -ceq 'excel') {
+            try { $App.ScreenUpdating = $true } catch { }
+            try { $App.EnableEvents = $true } catch { }
+            try { $App.DisplayAlerts = $true } catch { }
+            try { $App.AutomationSecurity = 2 } catch { }      # msoAutomationSecurityByUI
+            try { $App.Visible = $true } catch { }
+            try { $App.UserControl = $true } catch { }
+        } else {
+            try { $App.DisplayAlerts = -1 } catch { }            # wdAlertsAll
+            try { $App.AutomationSecurity = 2 } catch { }
+            try { $App.Visible = $true } catch { }             # 워드의 UserControl 은 읽기 전용
+        }
+        return
+    }
+    try { $App.Quit() } catch { }
+}
+'@
+
 # ---- 따로 돌리기 · 시간 제한 ---------------------------------------------------------------------
 
 function Invoke-OfficeWork([scriptblock]$Work, $Path, [string]$ProcessName, [int]$TimeoutSec, [string]$TimeoutText, [string]$Label,
@@ -143,13 +224,23 @@ function Invoke-OfficeWork([scriptblock]$Work, $Path, [string]$ProcessName, [int
     # 끝나면 그 결과를, 넘으면 이 실행이 띄운 오피스를 끝낸 뒤 TimeoutException 을 던진다. 어느 쪽이든 띄운 오피스는 남기지 않는다.
     # 일 안의 오류는 FailText('{0}' = Label, '{1}' = 사유) 글자로 다시 던진다.
     $script:OfficeForced = 0
+    $kind = if ($ProcessName -ieq 'WINWORD.EXE') { 'word' } else { 'excel' }
+    $box = [hashtable]::Synchronized(@{ foreign = $false; left = $null; foreign_text = $script:OfficeForeignText[$kind]; test_preopen = $null; test_extra = $null })
+    if ($null -ne $script:OfficeTestHooks) {
+        $box.test_preopen = $script:OfficeTestHooks['preopen']
+        $box.test_extra = $script:OfficeTestHooks['extra']
+        $script:OfficeTestHooks = $null
+    }
     $before = Get-OfficeProcesses $ProcessName -IdsOnly
     $runspace = [runspacefactory]::CreateRunspace()
     # MTA: STA 로 돌리면 끝날 때 COM 참조 정리(GC 종료자)가 그 스레드를 기다리며 수십 초 멈춘다(이 PC 엑셀에서 24초)
     $runspace.ApartmentState = [Threading.ApartmentState]::MTA
     $runspace.Open()
+    $runspace.SessionStateProxy.SetVariable('OfficeBox', $box)
     $shell = [powershell]::Create()
     $shell.Runspace = $runspace
+    [void]$shell.AddScript($script:OfficeGuard).Invoke()   # 남의 문서 보호 함수(global:)를 먼저 심는다
+    $shell.Commands.Clear()
     [void]$shell.AddScript($Work.ToString()).AddArgument($Path)
     $handle = $shell.BeginInvoke()
     $done = $handle.AsyncWaitHandle.WaitOne([Math]::Max(0, $TimeoutSec) * 1000)
@@ -181,9 +272,14 @@ function Invoke-OfficeWork([scriptblock]$Work, $Path, [string]$ProcessName, [int
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
         [GC]::Collect()
-        # Quit 뒤 잠깐 남는 오피스는 스스로 끝나기를 기다리고, 그래도 남으면 끝낸다(그 수를 $script:OfficeForced 에 남김)
-        $forced = Stop-OwnOffice $before $ProcessName $script:OfficeExitWaitSec
-        $script:OfficeForced = $forced.Count
+        if ($box.foreign -or $null -ne $box.left) {
+            # 우리 것이 아닌 인스턴스였거나(손대지 않음) 남의 문서가 있어 사용자에게 넘겼다: 끝내지 않는다
+            if ($null -ne $box.left) { $script:OfficeHandovers.Add(($script:OfficeLeftText[$kind] -f $box.left)) }
+        } else {
+            # Quit 뒤 잠깐 남는 오피스는 스스로 끝나기를 기다리고, 그래도 남으면 끝낸다(그 수를 $script:OfficeForced 에 남김)
+            $forced = Stop-OwnOffice $before $ProcessName $script:OfficeExitWaitSec
+            $script:OfficeForced = $forced.Count
+        }
     }
     if ($null -ne $failure) { throw ($FailText -f $Label, $failure) }
     if ($output.Count -eq 0) { throw ('{0}에서 아무것도 받지 못했습니다.' -f $Label) }
@@ -201,11 +297,13 @@ $script:WordWork = {
     $doc = $null
     try {
         $word = New-Object -ComObject Word.Application
+        Assert-OfficeFresh $word 'word'         # 이미 문서가 열린 워드면 우리 것이 아니다: 손대지 않고 오류(finally 도 Quit 하지 않음)
         $word.Visible = $false
         $word.DisplayAlerts = 0                 # wdAlertsNone
         $word.AutomationSecurity = 3            # msoAutomationSecurityForceDisable (매크로 끔, 이 워드에만)
         # Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles)
         $doc = $word.Documents.Open($Path, $false, $true, $false)
+        Invoke-OfficeTestExtra $word 'word'
         $pages = [int]$doc.ComputeStatistics(2)   # wdStatisticPages
         # 표가 차지하는 구간과 그 행들. 칸 안 문단이 여러 개인 행만 문단마다 쪽 · 높이 · 왼쪽 위치를 문단 첫 글자 자리에서 읽는다
         # (위치 읽기는 느리고, 칸마다 문단이 하나인 행은 칸 순서대로 한 줄이면 된다. 위치를 안 읽은 문단은 y = -1).
@@ -264,7 +362,7 @@ $script:WordWork = {
     } finally {
         # 여기까지 문서가 남아 있으면(읽다가 오류 · 닫기 실패) 한 번 더 닫아 본다
         if ($null -ne $doc) { try { $doc.Close([ref]0) } catch { } ; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($doc) }
-        if ($null -ne $word) { try { $word.Quit() } catch { } ; [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word) }
+        if ($null -ne $word) { Exit-OfficeApp $word 'word' @($Path); [void][Runtime.InteropServices.Marshal]::ReleaseComObject($word) }
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
     }
@@ -333,10 +431,10 @@ function ConvertTo-WordText($Blocks) {
     return [string]::Join("`n", $kept.ToArray())
 }
 
-function Read-WordText([string]$Path, [int]$TimeoutSec = $script:OfficeTimeoutSec, [string]$Job = '워드', [scriptblock]$Work = $script:WordWork) {
+function Read-WordText([string]$Path, [int]$TimeoutSec = $script:OfficeTimeoutSec, [scriptblock]$Work = $script:WordWork) {
     # 워드로 PDF(또는 워드 문서)를 읽어 정규화한 글자와 쪽 수: @{ text; pages; close_error }(close_error = 문서 닫기 실패 사유, 정상 $null). 시간 제한을 넘으면 TimeoutException(워드가 응답하지 않음).
     # $Work 는 시험에서 멈춘 워드를 흉내 낼 때만 바꾼다.
-    $copy = New-OfficeCopy $Path $Job
+    $copy = New-OfficeCopy $Path
     try {
         $raw = Invoke-OfficeWork $Work $copy.Path 'WINWORD.EXE' $TimeoutSec $script:WordTimeoutText '워드'
     } finally {
@@ -361,6 +459,7 @@ $script:ExcelWork = {
     $book = $null
     try {
         $excel = Hold (New-Object -ComObject Excel.Application)
+        Assert-OfficeFresh $excel 'excel'       # 이미 통합 문서가 열린 엑셀이면 우리 것이 아니다: 손대지 않고 오류(finally 도 Quit 하지 않음)
         $excel.Visible = $false
         $excel.DisplayAlerts = $false
         $excel.ScreenUpdating = $false
@@ -369,6 +468,7 @@ $script:ExcelWork = {
         $books = Hold $excel.Workbooks
         # Open(Filename, UpdateLinks=0, ReadOnly=$true)
         $book = Hold $books.Open($Path, 0, $true)
+        Invoke-OfficeTestExtra $excel 'excel'
         $activeName = [string](Hold $book.ActiveSheet).Name
         $active = 0
         $sheets = New-Object System.Collections.Generic.List[object]
@@ -395,7 +495,7 @@ $script:ExcelWork = {
         [pscustomobject]@{ active = $active; sheets = $sheets.ToArray() }
     } finally {
         if ($null -ne $book) { try { $book.Close($false) } catch { } }
-        if ($null -ne $excel) { try { $excel.Quit() } catch { } }
+        Exit-OfficeApp $excel 'excel' @($Path)   # 남의 통합 문서가 남아 있으면 Quit 대신 보이게 넘겨 준다
         for ($i = $held.Count - 1; $i -ge 0; $i--) {
             try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($held[$i]) } catch { }
         }
@@ -446,10 +546,10 @@ function ConvertTo-ExcelGrid($Raw) {
     return [pscustomobject]@{ active = [int]$Raw.active; sheets = $sheets.ToArray() }
 }
 
-function Read-ExcelGrid([string]$Path, [int]$TimeoutSec = $script:OfficeTimeoutSec, [string]$Job = '엑셀', [scriptblock]$Work = $script:ExcelWork) {
+function Read-ExcelGrid([string]$Path, [int]$TimeoutSec = $script:OfficeTimeoutSec, [scriptblock]$Work = $script:ExcelWork) {
     # 엑셀로 통합 문서를 읽어 격자(작업 3 모양, PSCustomObject)로. 시간 제한을 넘으면 TimeoutException(엑셀이 응답하지 않음).
     # $Work 는 시험에서 멈춘 엑셀을 흉내 낼 때만 바꾼다.
-    $copy = New-OfficeCopy $Path $Job
+    $copy = New-OfficeCopy $Path
     try {
         $raw = Invoke-OfficeWork $Work $copy.Path 'EXCEL.EXE' $TimeoutSec $script:ExcelTimeoutText '엑셀'
     } finally {
@@ -484,17 +584,26 @@ function Invoke-OfficeOp($Payload) {
     # 엔진 op 'office'(시험용 입구). action:
     #   select_pids     {before, after: [{pid, commandline}]}  → [pid, ...]
     #   normalize_word  {blocks}                               → {text}
-    #   read_word       {path, timeout?}                       → {text, pages, close_error, forced}
-    #   read_excel      {path, timeout?}                       → {grid, forced}   (forced = Quit 뒤 강제로 끝낸 오피스 수)
+    #   read_word       {path, timeout?, test_preopen?, test_extra?} → {text, pages, close_error, forced, left}
+    #   read_excel      {path, timeout?, test_preopen?, test_extra?} → {grid, forced, left}   (forced = Quit 뒤 강제로 끝낸 오피스 수,
+    #                   left = 남의 문서가 있어 끝내지 않고 넘겨 준 기록 | null. test_* 는 시험용: 만든 직후 · 우리 문서를 연 뒤 같은 인스턴스에서 열 파일)
     #   pdf_warning_off {}                                     → {off}
     #   excel_markup    {path, timeout?}                       → 엑셀로 읽은 격자(메모리 그대로)로 마크업표 읽기(markup op 의 read 와 같은 출력)
     #   excel_extract   {path, rules, timeout?}                → 엑셀로 읽은 격자(메모리 그대로)로 extract_grid 결과
-    #   new_copy        {path, job}                            → {folder, path}  (임시 복사본만 만들고 지우지 않음)
+    #   new_copy        {path}                                 → {folder, path}  (임시 복사본만 만들고 지우지 않음)
     #   stop_own        {name, before: [{pid}], grace}         → {forced: [pid, ...]}
     #   stuck           {app: word|excel, path, timeout}       → 언제나 시간 제한 오류(멈춘 오피스 흉내)
     #   work_path       {app: word|excel, path}                → {path}  (오피스 일이 받은 경로. 오피스는 띄우지 않음)
     $timeout = $script:OfficeTimeoutSec
     if ($null -ne $Payload.PSObject.Properties['timeout'] -and $null -ne $Payload.timeout) { $timeout = [int]$Payload.timeout }
+    $hooks = @{}
+    foreach ($key in @('preopen', 'extra')) {
+        $p = $Payload.PSObject.Properties['test_' + $key]
+        if ($null -ne $p -and $p.Value) { $hooks[$key] = [string]$p.Value }
+    }
+    if ($hooks.Count -gt 0) { $script:OfficeTestHooks = $hooks }
+    $script:OfficeHandovers.Clear()
+    $left = { if ($script:OfficeHandovers.Count -gt 0) { [string]::Join("`n", $script:OfficeHandovers.ToArray()) } else { $null } }
     switch ([string]$Payload.action) {
         'select_pids' {
             $own = Select-OwnOfficePids @($Payload.before) @($Payload.after)
@@ -503,11 +612,11 @@ function Invoke-OfficeOp($Payload) {
         'normalize_word' { return ConvertTo-Json -InputObject @{ text = (ConvertTo-WordText $Payload.blocks) } -Depth 20 -Compress }
         'read_word' {
             $read = Read-WordText ([string]$Payload.path) $timeout
-            return ConvertTo-Json -InputObject @{ text = $read.text; pages = $read.pages; close_error = $read.close_error; forced = $script:OfficeForced } -Depth 20 -Compress
+            return ConvertTo-Json -InputObject @{ text = $read.text; pages = $read.pages; close_error = $read.close_error; forced = $script:OfficeForced; left = (& $left) } -Depth 20 -Compress
         }
         'read_excel' {
             $grid = Read-ExcelGrid ([string]$Payload.path) $timeout
-            return ConvertTo-Json -InputObject @{ grid = $grid; forced = $script:OfficeForced } -Depth 20 -Compress
+            return ConvertTo-Json -InputObject @{ grid = $grid; forced = $script:OfficeForced; left = (& $left) } -Depth 20 -Compress
         }
         'pdf_warning_off' { return ConvertTo-Json -InputObject @{ off = (Test-PdfWarningOff) } -Depth 20 -Compress }
         'excel_markup' {
@@ -519,7 +628,7 @@ function Invoke-OfficeOp($Payload) {
             return ConvertTo-ResultJson (Get-GridExtract (ConvertTo-PortableRules $Payload.rules) $grid)
         }
         'new_copy' {
-            $copy = New-OfficeCopy ([string]$Payload.path) ([string]$Payload.job)
+            $copy = New-OfficeCopy ([string]$Payload.path)
             return ConvertTo-Json -InputObject @{ folder = $copy.Folder; path = $copy.Path } -Depth 20 -Compress
         }
         'stop_own' {
@@ -534,16 +643,16 @@ function Invoke-OfficeOp($Payload) {
             # 오피스 대신 받은 경로만 돌려주는 일: 워드 결과는 글자 한 문단, 엑셀 결과는 시트 이름
             if ([string]$Payload.app -ceq 'excel') {
                 $echo = { param([string]$Path) [pscustomobject]@{ active = 0; sheets = @(@{ name = $Path; row = 1; col = 1; rows = 0; cols = 0; value2 = $null; value = $null; formats = @{} }) } }
-                $given = (Read-ExcelGrid ([string]$Payload.path) $timeout '엑셀' $echo).sheets[0].name
+                $given = (Read-ExcelGrid ([string]$Payload.path) $timeout $echo).sheets[0].name
             } else {
                 $echo = { param([string]$Path) [pscustomobject]@{ pages = 1; blocks = @(@{ kind = 'p'; text = $Path; list = '' }) } }
-                $given = (Read-WordText ([string]$Payload.path) $timeout '워드' $echo).text
+                $given = (Read-WordText ([string]$Payload.path) $timeout $echo).text
             }
             return ConvertTo-Json -InputObject @{ path = $given } -Depth 20 -Compress
         }
         'stuck' {
-            if ([string]$Payload.app -ceq 'excel') { [void](Read-ExcelGrid ([string]$Payload.path) $timeout '엑셀' $script:StuckWork.excel) }
-            else { [void](Read-WordText ([string]$Payload.path) $timeout '워드' $script:StuckWork.word) }
+            if ([string]$Payload.app -ceq 'excel') { [void](Read-ExcelGrid ([string]$Payload.path) $timeout $script:StuckWork.excel) }
+            else { [void](Read-WordText ([string]$Payload.path) $timeout $script:StuckWork.word) }
             throw '멈춘 오피스 흉내가 끝나 버렸습니다.'
         }
     }
