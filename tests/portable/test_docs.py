@@ -147,4 +147,5 @@ def test_claude_md_portable_rule():
 
 @pytest.mark.parametrize("path", [CHAPTER, README, TROUBLE, WORK_ORDER, CLAUDE_MD], ids=lambda p: p.name)
 def test_no_company_initials(path):
-    assert not re.search(r"\bDG\b", _text(path))
+    initials = chr(68) + chr(71)  # 글자 그대로 저장소에 남기지 않는다
+    assert not re.search(rf"\b{initials}\b", _text(path))
